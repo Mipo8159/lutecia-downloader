@@ -1,0 +1,6 @@
+# Keep the launcher runnable on macOS/Linux even if the repo passes through Windows, and never touch binaries.
+*.command text eol=lf
+*.sh      text eol=lf
+.env.example text eol=crlf
+*.exe     binary
+bin/*     binary

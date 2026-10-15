@@ -1,0 +1,3 @@
+# Settings with the token, and downloaded customer data: never on GitHub.
+.env
+Bitrix import/
