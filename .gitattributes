@@ -1,6 +1,5 @@
-# Keep the launcher runnable on macOS/Linux even if the repo passes through Windows, and never touch binaries.
-*.command text eol=lf
-*.sh      text eol=lf
-.env.example text eol=crlf
-*.exe     binary
-bin/*     binary
+# The click-files are binary (Lutecia.command is a script with programs packed after it): git must never touch them.
+Lutecia.exe     binary
+Lutecia.command binary
+*.sh            text eol=lf
+src/env.example text eol=crlf

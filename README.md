@@ -1,71 +1,76 @@
 # Lutecia downloader
 
-Double-click it, and it gets the newest data out of APEX and saves it as CSV files ready for the Bitrix24 import:
+One double-click gets the newest Lutecia data, ready for the Bitrix24 import.
 
-1. asks the Lutecia sync server to pull the latest data from APEX now, and waits for it (10–30 seconds);
-2. downloads every new data folder into **`Bitrix import/`** in this folder;
-3. opens that folder and says in which order to import.
-
-Only new data is downloaded, never the same folder twice.
+```
+Windows/Lutecia.exe        for Windows
+Mac/Lutecia.command        for Mac (Linux: run ./Lutecia.command in a terminal)
+```
 
 ## Setup (once per computer)
 
-1. Get this folder onto the computer: `git clone <repo url>`, or on GitHub **Code → Download ZIP** and unzip it.
-2. Copy `.env.example` to **`.env`** (same folder) and fill in the token:
-   ```
-   LUTECIA_SERVER=http://<server address>:3000
-   LUTECIA_TOKEN=<the server's SYNC_API_TOKEN>
-   ```
-   On Windows, Notepad can do it: open `.env.example`, fill in the token, then **File → Save As**, set the file name
-   to `".env"` with the quotes and "Save as type" to *All files*.
+1. Get this folder onto the computer: on GitHub **Code → Download ZIP**, then unzip it (or `git clone <repo url>`).
+2. Open the folder for your computer (**Windows** or **Mac**) and double-click **Lutecia**.
+3. The first time, a settings file opens (Notepad on Windows, TextEdit on Mac). Fill in the two lines Sweeft gives
+   you (`LUTECIA_SERVER`, `LUTECIA_TOKEN`), **save**, close it, and double-click **Lutecia** again.
 
-That is all. `.env` stays on that computer; it is never uploaded (see `.gitignore`).
-
-## Use
-
-| Computer | Double-click |
-|---|---|
-| Windows | `Lutecia Download.exe` |
-| macOS, Linux | `Lutecia Download.command` |
+The settings are saved in `.env` next to the program; it is never uploaded to GitHub. Lutecia opens it again by
+itself if something in it is wrong (for example a changed access key).
 
 **First time only:**
 - **Windows** may show "Windows protected your PC": click **More info → Run anyway**.
-- **macOS** may say it can't verify the developer: open **System Settings → Privacy & Security** and click
-  **Open Anyway** next to "Lutecia Download.command".
+- **Mac** may say it can't check the program: open **System Settings → Privacy & Security**, scroll down, and click
+  **Open Anyway** next to "Lutecia.command". If it asks for access to a folder, click **Allow**.
 
-You get neither warning if the folder was put on the computer with `git clone`.
+## Every time you need fresh data
 
-**Then, in Bitrix24:** import each new folder in `Bitrix import/` **once, oldest first**. Inside each folder,
-`IMPORT_ORDER.txt` gives the order of the files. When a folder is imported, you may delete it: it is not
-downloaded again. Do not edit or delete `Bitrix import/downloaded.txt`: it records what was already downloaded.
-Without it everything is downloaded again, and importing deals twice duplicates them in Bitrix.
+Double-click **Lutecia**. It asks the server for the latest data (a timer shows it is working), says **DONE** with
+the numbers, and opens the folder **`Lutecia for Bitrix`** (next to the program) with up to three files.
 
-## Messages
+Import them into Bitrix24 **in this order**, then **delete the files**:
 
-| It says | Meaning |
-|---|---|
-| `no .env next to this program` | Setup step 2 is missing |
-| `cannot reach the server` | The server is off, or this computer is not on its network / VPN |
-| `the server rejected LUTECIA_TOKEN` | Wrong token in `.env` |
-| `no fresh data this time: …` | APEX couldn't be read just now. You still get everything the server had; try again later |
-| `Nothing new` | All downloaded already. The server also pulls by itself every 3 hours |
+1. `products.csv` (CRM → Products → Import)
+2. `contacts.csv` (CRM → Contacts → Import)
+3. `deals.csv` (CRM → Deals → Import)
 
-`--no-pull` (from a terminal) skips step 1 and only downloads.
+Each double-click brings only what is new or changed since the last one, so Bitrix never gets anything twice.
+Forgot to import before double-clicking again? Nothing is lost: the new data is added to the same files.
+**Never delete the files before they are imported**: their data is not sent again (ask Sweeft if it happened).
+
+`deals.csv` holds the purchases of the last year (one deal per receipt, its products as rows). Bitrix import can
+only add deals, never remove them, so **once a month** delete the old ones: CRM → Deals → list view → filter
+"Close date" before today minus one year → select all → Delete.
+
+Columns with Bitrix's own names map by themselves. The others (Brand, Barcode, Loyalty card, Total spend, ...) go to
+a product property or contact field created once in Bitrix. **Contact key** is in both `contacts.csv` and
+`deals.csv`: map it to a "Contact key" field on contacts and on deals. It is the customer's id, so a deal's buyer is
+always the contact with the same Contact key.
 
 ## For developers
 
 ```
-Lutecia Download.exe       Windows binary (built)
-Lutecia Download.command   macOS/Linux launcher: picks bin/lutecia-download-<os>-<arch>
-bin/                       macOS (Apple Silicon, Intel) and Linux (x86-64, ARM) binaries (built)
-src/                       Go source and tests
-build.sh                   tests + rebuilds all binaries; needs only Docker
+Windows/Lutecia.exe    Windows program (built)
+Mac/Lutecia.command    macOS + Linux: a short script with the macOS (Apple Silicon, Intel) and Linux programs
+                       packed after it; it starts the right one (built)
+src/                   Go source and tests; src/env.example is the settings template built into the program
+build.sh               tests + rebuilds both files; needs only Docker; reproducible (same source = same bytes)
 ```
 
-After changing `src/`, run `./build.sh` and commit the rebuilt binaries with the source. Builds are
-reproducible, so unchanged source gives byte-identical binaries and no git change.
+One file for every system is impossible: Windows runs only `.exe` files, and a Mac won't open one.
+After changing `src/`, run `./build.sh` and commit both files with the source.
 
-The server side is the `lutecia-sync` NestJS service: `POST /sync/runs` (start a pull), `GET /sync/runs/:id`
-(poll it), `GET /bundles` (committed bundles, oldest first) and `GET /bundles/:id/files/:name`, all with
-`Authorization: Bearer <SYNC_API_TOKEN>`. A bundle holds only rows that are new or changed since the previous one,
-so each must be imported exactly once, in order; that is why the downloader keeps `downloaded.txt`.
+Production servers need `https://` in `LUTECIA_SERVER`: the token goes with every request, so plain `http://`
+is accepted only for a local or private address.
+
+How it works: the server (`lutecia-sync`) makes a bundle per pull with only the new or changed rows. The program
+fetches every bundle it has not had before (`POST /sync/runs`, `GET /bundles`, `GET /bundles/:id/files/:name`, with
+`Authorization: Bearer <token>`) and merges each into one file per entity: a newer record replaces the one with the
+same key (products: External ID; contacts: Contact key; deals: Deal key, the deal's rows moved as a whole and its
+`ID` renumbered, since every bundle numbers its deals from 1). The list of downloaded bundles is kept in the user's
+settings folder (`lutecia-downloader/` in `%AppData%`, `~/Library/Application Support` or `~/.config`), one per
+server, so deleting the files never brings old data back.
+
+**Starting over** (files deleted before import, or a fresh Bitrix portal): on the server run
+`node dist/cli.js run --full --force-full --with-personal-data` (see lutecia-sync's README). The server then makes
+one bundle with everything (all products and contacts, the last year of deals); the client's next normal
+double-click downloads it. Delete the year's deals in Bitrix first if they were imported, or they double.
