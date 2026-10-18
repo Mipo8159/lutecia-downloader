@@ -39,12 +39,26 @@ Forgot to import before double-clicking again? Nothing is lost: the new data is 
 
 `deals.csv` holds the purchases of the last year (one deal per receipt, its products as rows). Bitrix import can
 only add deals, never remove them, so **once a month** delete the old ones: CRM → Deals → list view → filter
-"Close date" before today minus one year → select all → Delete.
+"Sale date" before today minus one year → select all → Delete.
 
-Columns with Bitrix's own names map by themselves. The others (Brand, Barcode, Loyalty card, Total spend, ...) go to
-a product property or contact field created once in Bitrix. **Contact key** is in both `contacts.csv` and
-`deals.csv`: map it to a "Contact key" field on contacts and on deals. It is the customer's id, so a deal's buyer is
-always the contact with the same Contact key.
+Columns with Bitrix's own names map by themselves. Create the others once in Bitrix as custom fields (product
+properties for products) and map them at import:
+
+- **Contacts:** Contact key, Loyalty card, Card discount %, Home store, Customer since, Purchases, Total spend,
+  First purchase, Last purchase, Average purchase, Purchases (last year), Spend (last year), Returns,
+  Favourite brand, Brands bought, Favourite category, Categories bought.
+- **Deals:** Contact key, Sale date (a date field), Sale time, Loyalty card, Store, Seller, Payment, Items,
+  Brands, Categories.
+- **Products:** Brand, Color / line, Gender, Size, Volume, Barcode, Sold by.
+
+**Contact key** is the customer's id: a deal's buyer is always the contact with the same Contact key. The import
+links a deal to its contact by first and last name ("Contact"); when two contacts share a name that column is left
+empty, so the deal is not attached to the wrong person, and Contact key still says who bought.
+**Sale date** is the real date of the purchase: Bitrix may put the import day into Close date.
+
+What the CRM can answer with this, for example: contacts with Favourite brand = TERENZI; contacts whose Brands bought
+contains LANCOME and Last purchase is over 6 months ago; deals whose Brands contains DIOR in the last 3 months, by
+Store or Seller; the best customers by Spend (last year).
 
 ## For developers
 
