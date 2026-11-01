@@ -170,8 +170,8 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 		t.Fatal("the test folder was just made")
 	}
 	entries, _ := os.ReadDir(cfg.Folder)
-	if len(entries) != 2 {
-		t.Fatalf("the main folder must hold only production and test, got %d", len(entries))
+	if len(entries) != 3 {
+		t.Fatalf("the main folder must hold only excel, production and test, got %d", len(entries))
 	}
 	msg := summary(cfg, res)
 	for _, s := range []string{"products.csv, then offline_contact.csv, then offline_deals.csv", cfg.test(), "delete the test deals"} {

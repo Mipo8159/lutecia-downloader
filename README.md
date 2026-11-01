@@ -25,10 +25,12 @@ itself if something in it is wrong (for example a changed access key).
 ## Every time you need fresh data
 
 Double-click **Lutecia**. It asks the server for the latest data (a timer shows it is working), says **DONE** with
-the numbers, and opens the folder **`Lutecia for Bitrix`** (next to the program). It holds two folders with the same
-three files:
+the numbers, and opens the folder **`Lutecia for Bitrix`** (next to the program). It holds up to three folders with the same three sets of data:
 
-- **`production`**: the real data.
+- **`excel`**: copies for looking at the data. Double-click them; Georgian text, columns and barcodes show correctly.
+  Never import these into Bitrix. The program overwrites them, so save your own work elsewhere. Delete them together
+  with the `production` files: they hold customer data (the next double-click also removes them).
+- **`production`**: the real data, the files to import. If you open one in Excel, don't save it.
 - **`test`**: a small part of it (about 10 deals, their buyers and their products) for trying an import. The test
   deals have names starting with `TEST`: delete them in Bitrix before importing `production`, or those deals are there
   twice. Delete the `test` folder when you finish testing, because it holds customer data. It is remade only when

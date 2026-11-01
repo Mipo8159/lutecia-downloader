@@ -40,6 +40,7 @@ const (
 	folderName     = "Lutecia for Bitrix"
 	productionName = "production"
 	testName       = "test"
+	excelName      = "excel"
 )
 
 //go:embed env.example
@@ -83,13 +84,15 @@ type fileRows struct {
 }
 
 type result struct {
-	New       []string   // bundles downloaded this time, oldest first
-	Files     []fileRows // what the folder holds now, in import order
-	TestReady bool       // the test folder was made from these files just now
+	New        []string   // bundles downloaded this time, oldest first
+	Files      []fileRows // what the folder holds now, in import order
+	TestReady  bool       // the test folder was made from these files just now
+	ExcelReady bool       // the excel folder holds a copy of each of these files
 }
 
 func (c config) production() string { return filepath.Join(c.Folder, productionName) }
 func (c config) test() string       { return filepath.Join(c.Folder, testName) }
+func (c config) excel() string      { return filepath.Join(c.Folder, excelName) }
 
 func main() {
 	home := flag.String("home", "", "folder with .env and the output (default: this program's folder)")
@@ -152,6 +155,11 @@ func summary(cfg config, res result) string {
 	}
 	fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
 	b.WriteString("When everything is imported, delete these files. The next time, new files are made.")
+	if res.ExcelReady {
+		fmt.Fprintf(&b, "\n\nTo look at the data, double-click the files in\n  %s\n"+
+			"Those are only for looking: always import the files from production into Bitrix24.\n"+
+			"Delete them together with the production files: they hold customer data.", cfg.excel())
+	}
 	if res.TestReady {
 		fmt.Fprintf(&b, "\n\nTo try an import first, use the small files in\n  %s\n"+
 			"The test deals have names starting with TEST: delete the test deals in Bitrix24 before importing production,\n"+
@@ -168,6 +176,10 @@ type options struct {
 
 // run optionally pulls fresh data, then merges every bundle not downloaded before into the folder's files.
 func run(cfg config, opts options, out io.Writer) (result, error) {
+	// First, before anything that can fail: customer data must not outlive the production files.
+	if stuck := cleanExcel(cfg.production(), cfg.excel()); len(stuck) > 0 {
+		fmt.Fprintf(out, "Please close %s in Excel and delete it: the data is no longer needed there.\n", strings.Join(stuck, ", "))
+	}
 	client := &http.Client{Transport: &http.Transport{
 		Proxy:                 http.ProxyFromEnvironment,
 		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
@@ -217,6 +229,13 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 	res.Files, err = countFiles(cfg.production())
 	if err != nil {
 		return res, err
+	}
+	if stuck := cleanExcel(cfg.production(), cfg.excel()); len(stuck) > 0 && len(res.New) > 0 {
+		fmt.Fprintf(out, "Please close %s in Excel and delete it.\n", strings.Join(stuck, ", "))
+	}
+	if res.ExcelReady, err = syncExcel(cfg.production(), cfg.excel(), res.Files); err != nil {
+		res.ExcelReady = false
+		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The production files are fine.\n", err)
 	}
 	if len(res.Files) > 0 {
 		res.TestReady, err = writeTestSlice(cfg.production(), cfg.test())
