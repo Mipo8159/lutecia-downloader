@@ -17,14 +17,14 @@ import (
 
 const token = "t0k"
 
-// fake plays the sync server: /bundles like BundlesController, /sync/* like SyncController.
+// fake plays the heartbeat server: /bundles like BundlesController, /heartbeat/* like HeartbeatController.
 type fake struct {
 	mu       sync.Mutex
 	ids      []string
 	files    map[string]map[string]string
 	short    string // "<id>/<file>" served cut in half
-	pullTo   string // a POST /sync/runs creates this bundle ("" = pull adds nothing)
-	pullFail string // a POST /sync/runs ends 'failed' with this note
+	pullTo   string // a POST /heartbeat/runs creates this bundle ("" = pull adds nothing)
+	pullFail string // a POST /heartbeat/runs ends 'failed' with this note
 	busy     bool   // a pull is already running: POST gets 409, then it ends after one poll
 	polls    int
 	posts    int
@@ -44,7 +44,7 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	switch {
-	case r.Method == "POST" && r.URL.Path == "/sync/runs":
+	case r.Method == "POST" && r.URL.Path == "/heartbeat/runs":
 		f.posts++
 		if f.busy {
 			w.WriteHeader(409)
@@ -53,9 +53,9 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		w.WriteHeader(202)
 		io.WriteString(w, `{"runId":7}`)
-	case r.URL.Path == "/sync/status":
+	case r.URL.Path == "/heartbeat/status":
 		io.WriteString(w, `{"active":{"runId":6}}`)
-	case strings.HasPrefix(r.URL.Path, "/sync/runs/"):
+	case strings.HasPrefix(r.URL.Path, "/heartbeat/runs/"):
 		f.polls++
 		if f.polls < 2 {
 			io.WriteString(w, `{"status":"running","note":null}`)
@@ -143,18 +143,18 @@ func TestFoldsEveryNewBundleIntoOneFilePerEntity(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_030000", "2026-10-14_060000"}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if got := read(t, filepath.Join(cfg.Folder, "products.csv")); got != productsHead+
+	if got := read(t, filepath.Join(cfg.production(), "products.csv")); got != productsHead+
 		"IVF-P1,Lipstick,12.00\r\nIVF-P2,\"Perfume, 50ml\",99.00\r\nVST-P3,\"Gown\r\nlong\",5.00\r\n" { // CRLF file: CRLF inside quotes too
 		t.Fatalf("products: newer row must replace in place, new rows appended:\n%s", got)
 	}
-	if got := read(t, filepath.Join(cfg.Folder, "contacts.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
+	if got := read(t, filepath.Join(cfg.production(), "offline_contact.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
 		t.Fatalf("contacts: same Key in Comment = same contact:\n%s", got)
 	}
-	entries, _ := os.ReadDir(cfg.Folder)
+	entries, _ := os.ReadDir(cfg.production())
 	if len(entries) != 2 {
 		t.Fatalf("the folder must hold only the two import files, got %d entries", len(entries))
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"contacts.csv", 1}}) {
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contact.csv", 1}}) {
 		t.Fatalf("import order and counts: %+v", res.Files)
 	}
 }
@@ -170,7 +170,7 @@ func TestNotImportedYetMeansAddedToTheSameFiles(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"contacts.csv", 1}}) {
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contact.csv", 1}}) {
 		t.Fatalf("second click without importing must keep the first click's rows: %+v", res.Files)
 	}
 }
@@ -181,8 +181,8 @@ func TestImportedAndDeletedMeansNewFilesWithOnlyNewRows(t *testing.T) {
 	if _, err := run(cfg, noPull, io.Discard); err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(filepath.Join(cfg.Folder, "products.csv")) // the client imported both, then deleted them
-	os.Remove(filepath.Join(cfg.Folder, "contacts.csv"))
+	os.Remove(filepath.Join(cfg.production(), "products.csv")) // the client imported both, then deleted them
+	os.Remove(filepath.Join(cfg.production(), "offline_contact.csv"))
 
 	res, err := run(cfg, noPull, io.Discard)
 	if err != nil || len(res.New) != 0 || len(res.Files) != 0 {
@@ -194,10 +194,10 @@ func TestImportedAndDeletedMeansNewFilesWithOnlyNewRows(t *testing.T) {
 
 	f.ids = append(f.ids, "2026-10-14_060000")
 	res, err = run(cfg, noPull, io.Discard)
-	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 2}, {"contacts.csv", 1}}) {
+	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 2}, {"offline_contact.csv", 1}}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "products.csv, then contacts.csv") || !strings.Contains(msg, "2 products") {
+	if msg := summary(cfg, res); !strings.Contains(msg, "products.csv, then offline_contact.csv") || !strings.Contains(msg, "2 products") {
 		t.Fatal(msg)
 	}
 }

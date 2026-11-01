@@ -1,7 +1,7 @@
 // Lutecia downloader (Windows, macOS, Linux): double-click it, and it
-//  1. asks the sync server to pull the latest data from APEX now, and waits for it (with a ticking timer);
+//  1. asks the heartbeat server to pull the latest data from APEX now, and waits for it (with a ticking timer);
 //  2. downloads every bundle it has not downloaded before, oldest first, and merges each one into ONE file per
-//     entity (products.csv, contacts.csv) in "Lutecia for Bitrix" next to it;
+//     entity in "Lutecia for Bitrix/production" next to it, and copies a small linked part into ".../test";
 //  3. says how many rows are ready and opens that folder.
 //
 // Bundles are deltas. The files hold everything downloaded and not imported yet: the client imports them, then
@@ -36,7 +36,11 @@ import (
 	"time"
 )
 
-const folderName = "Lutecia for Bitrix"
+const (
+	folderName     = "Lutecia for Bitrix"
+	productionName = "production"
+	testName       = "test"
+)
 
 //go:embed env.example
 var envTemplate []byte
@@ -50,15 +54,17 @@ var (
 	bundleID = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{6}$`)
 	fileName = regexp.MustCompile(`^[A-Za-z0-9_]+\.(csv|json|txt)$`)
 	// Bitrix needs this order: deals and contacts refer to products and companies by name.
-	importOrder = []string{"products.csv", "companies.csv", "contacts.csv", "deals.csv", "b2b_deals.csv"}
-	nouns       = map[string]string{"products.csv": "products", "companies.csv": "companies", "contacts.csv": "contacts",
-		"deals.csv": "deals", "b2b_deals.csv": "deals"}
+	importOrder = []string{"products.csv", "companies.csv", "offline_contact.csv", "offline_deals.csv", "b2b_deals.csv"}
+	nouns       = map[string]string{"products.csv": "products", "companies.csv": "companies", "offline_contact.csv": "contacts",
+		"offline_deals.csv": "deals", "b2b_deals.csv": "deals"}
+	// The server's name for a file -> the name the client gets. Others keep their name.
+	localNames = map[string]string{"contacts.csv": "offline_contact.csv", "deals.csv": "offline_deals.csv"}
 )
 
 type config struct {
 	Server string // http(s)://host:port
 	Token  string
-	Folder string // where the import files go
+	Folder string // "Lutecia for Bitrix": holds the production and test folders
 	State  string // the list of downloaded bundle ids
 }
 
@@ -77,9 +83,13 @@ type fileRows struct {
 }
 
 type result struct {
-	New   []string   // bundles downloaded this time, oldest first
-	Files []fileRows // what the folder holds now, in import order
+	New       []string   // bundles downloaded this time, oldest first
+	Files     []fileRows // what the folder holds now, in import order
+	TestReady bool       // the test folder was made from these files just now
 }
+
+func (c config) production() string { return filepath.Join(c.Folder, productionName) }
+func (c config) test() string       { return filepath.Join(c.Folder, testName) }
 
 func main() {
 	home := flag.String("home", "", "folder with .env and the output (default: this program's folder)")
@@ -126,10 +136,10 @@ func summary(cfg config, res result) string {
 	}
 	var b strings.Builder
 	if len(res.New) > 0 {
-		fmt.Fprintf(&b, "DONE! The new data is ready in the folder\n  %s\n\n", cfg.Folder)
+		fmt.Fprintf(&b, "DONE! The new data is ready in the folder\n  %s\n\n", cfg.production())
 	} else {
 		fmt.Fprintf(&b, "No new data since last time. The files from last time are still in the folder\n  %s\n"+
-			"If they are not imported into Bitrix24 yet, import them now.\n\n", cfg.Folder)
+			"If they are not imported into Bitrix24 yet, import them now.\n\n", cfg.production())
 	}
 	names := make([]string, len(res.Files))
 	for i, f := range res.Files {
@@ -137,11 +147,16 @@ func summary(cfg config, res result) string {
 		if noun == "" {
 			noun = "rows"
 		}
-		fmt.Fprintf(&b, "   %-14s %s %s\n", f.Name, thousands(f.Rows), noun)
+		fmt.Fprintf(&b, "   %-20s %s %s\n", f.Name, thousands(f.Rows), noun)
 		names[i] = f.Name
 	}
 	fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
 	b.WriteString("When everything is imported, delete these files. The next time, new files are made.")
+	if res.TestReady {
+		fmt.Fprintf(&b, "\n\nTo try an import first, use the small files in\n  %s\n"+
+			"The test deals have names starting with TEST: delete the test deals in Bitrix24 before importing production,\n"+
+			"or those deals are there twice. When you finish testing, delete that folder too: it holds customer data.", cfg.test())
+	}
 	return b.String()
 }
 
@@ -199,8 +214,18 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		}
 		res.New = append(res.New, b.ID)
 	}
-	res.Files, err = countFiles(cfg.Folder)
-	return res, err
+	res.Files, err = countFiles(cfg.production())
+	if err != nil {
+		return res, err
+	}
+	if len(res.Files) > 0 {
+		res.TestReady, err = writeTestSlice(cfg.production(), cfg.test())
+		if err != nil {
+			res.TestReady = false
+			fmt.Fprintf(out, "The small test files could not be made (%v). The production files are fine.\n", err)
+		}
+	}
+	return res, nil
 }
 
 // merge downloads one bundle's CSV files into a temporary folder, checks each is complete, and only then merges
@@ -225,11 +250,15 @@ func merge(client *http.Client, cfg config, b bundle) error {
 		}
 		got = append(got, f.Name)
 	}
-	if err := os.MkdirAll(cfg.Folder, 0o755); err != nil {
+	if err := os.MkdirAll(cfg.production(), 0o755); err != nil {
 		return err
 	}
 	for _, name := range got {
-		if err := mergeCSV(filepath.Join(cfg.Folder, name), filepath.Join(tmp, name)); err != nil {
+		local := name
+		if l, ok := localNames[name]; ok {
+			local = l
+		}
+		if err := mergeCSV(filepath.Join(cfg.production(), local), filepath.Join(tmp, name)); err != nil {
 			return err
 		}
 	}

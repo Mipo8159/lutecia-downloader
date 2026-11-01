@@ -20,7 +20,7 @@ type runState struct {
 // pull asks the server for a fresh APEX pull and waits for it. A pull that is already running (the 3-hour
 // schedule, or a colleague's click) is waited for instead of failing: the server allows one at a time.
 func pull(client *http.Client, cfg config, opts options) error {
-	res, err := call(client, cfg, http.MethodPost, "/sync/runs", strings.NewReader("{}"))
+	res, err := call(client, cfg, http.MethodPost, "/heartbeat/runs", strings.NewReader("{}"))
 	if err != nil {
 		return err
 	}
@@ -38,7 +38,7 @@ func pull(client *http.Client, cfg config, opts options) error {
 	case http.StatusAccepted:
 	case http.StatusConflict: // already running: wait for that one
 		body.Active = nil
-		if err := getJSON(client, cfg, "/sync/status", &body); err != nil {
+		if err := getJSON(client, cfg, "/heartbeat/status", &body); err != nil {
 			return err
 		}
 		if body.Active == nil {
@@ -52,7 +52,7 @@ func pull(client *http.Client, cfg config, opts options) error {
 	start := time.Now()
 	for {
 		var run runState
-		if err := getJSON(client, cfg, fmt.Sprintf("/sync/runs/%d", body.RunID), &run); err != nil {
+		if err := getJSON(client, cfg, fmt.Sprintf("/heartbeat/runs/%d", body.RunID), &run); err != nil {
 			return err
 		}
 		switch run.Status {
