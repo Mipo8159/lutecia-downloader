@@ -88,7 +88,7 @@ func TestColumnLetters(t *testing.T) {
 func TestExcelFolderFollowsProduction(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
-		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contact.csv"], "deals.csv": fx["offline_deals.csv"],
+		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"],
 	}}}
 	cfg := testConfig(t, newFake(t, f).URL)
 	res, err := run(cfg, noPull, io.Discard)
@@ -102,7 +102,7 @@ func TestExcelFolderFollowsProduction(t *testing.T) {
 		}
 		return out
 	}
-	if got := strings.Join(names(), " "); got != "offline_contact.xlsx offline_deals.xlsx products.xlsx" {
+	if got := strings.Join(names(), " "); got != "offline_contacts.xlsx offline_deals.xlsx products.xlsx" {
 		t.Fatal(got)
 	}
 	if msg := summary(cfg, res); !strings.Contains(msg, cfg.excel()) {
@@ -129,7 +129,7 @@ func TestExcelFolderFollowsProduction(t *testing.T) {
 	}
 
 	// the client imported and deleted production: customer data does not stay behind
-	for _, n := range []string{"products.csv", "offline_contact.csv", "offline_deals.csv"} {
+	for _, n := range []string{"products.csv", "offline_contacts.csv", "offline_deals.csv"} {
 		os.Remove(filepath.Join(cfg.production(), n))
 	}
 	res, err = run(cfg, noPull, io.Discard)
@@ -264,13 +264,13 @@ func TestChangedCopyAndRestoredOlderCSVAreBothRewritten(t *testing.T) {
 func TestOneCopyFailingDoesNotStopTheOthers(t *testing.T) {
 	dir := t.TempDir()
 	prod, excel := filepath.Join(dir, "production"), filepath.Join(dir, "excel")
-	writeFiles(t, prod, map[string]string{"products.csv": sliceProducts + "A,B,1\r\n", "offline_contact.csv": sliceContacts + "N,C1\r\n"})
+	writeFiles(t, prod, map[string]string{"products.csv": sliceProducts + "A,B,1\r\n", "offline_contacts.csv": sliceContacts + "N,C1\r\n"})
 	writeFiles(t, filepath.Join(excel, "products.xlsx"), map[string]string{"blocks": "the rename"}) // like a locked file
-	ready, err := syncExcel(prod, excel, []fileRows{{"products.csv", 1}, {"offline_contact.csv", 1}})
+	ready, err := syncExcel(prod, excel, []fileRows{{"products.csv", 1}, {"offline_contacts.csv", 1}})
 	if ready || err == nil || !strings.Contains(err.Error(), "products.xlsx may still show older data") {
 		t.Fatal(ready, err)
 	}
-	if _, err := os.Stat(filepath.Join(excel, "offline_contact.xlsx")); err != nil {
+	if _, err := os.Stat(filepath.Join(excel, "offline_contacts.xlsx")); err != nil {
 		t.Fatal("the other copy must still be made")
 	}
 	if entries, _ := filepath.Glob(filepath.Join(excel, ".*.tmp")); len(entries) != 0 {

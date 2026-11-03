@@ -39,10 +39,22 @@ the numbers, and opens the folder **`Lutecia for Bitrix`** (next to the program)
 Import the files from `production` into Bitrix24 **in this order**, then **delete them**:
 
 1. `products.csv` (CRM → Products → Import)
-2. `offline_contact.csv` (CRM → Contacts → Import)
-3. `offline_deals.csv` (CRM → Deals → Import)
+2. `offline_contacts.csv` (CRM → Contacts → Import)
+3. `online_contacts.csv` (CRM → Contacts → Import; duplicate control as for `offline_contacts.csv`, by Contact key,
+   "merge": a web shop customer who is also a store customer has the same Contact key and name and only adds e-mail,
+   address and the online columns)
+4. `offline_deals.csv` (CRM → Deals → Import)
+5. `online_deals.csv` (CRM → Deals → Import): web shop orders, **the same columns as `offline_deals.csv`**, so the same
+   field mapping. Store is "lutecia.ge". The shop gives no order date: Sale date is the day the order was first
+   downloaded (empty for orders older than the first download).
 
-Each double-click brings only what is new or changed since the last one, so Bitrix never gets anything twice.
+**In the Bitrix24 import choose encoding UTF-8 and separator comma.** The files are UTF-8 with a BOM (Georgian shows
+correctly), but **never open and save them in Excel** before importing: Excel saves in another encoding and with `;`,
+which breaks Georgian letters and turns phones like +995599123456 into numbers. To look at the data use the `excel`
+folder (phones and barcodes stay text there).
+
+Each double-click brings only what is new or changed since the last one. Keep the program in its folder: a new unzip
+starts over with everything, so never import those deals again if they are already in Bitrix (the program warns you).
 Forgot to import before double-clicking again? Nothing is lost: the new data is added to the same files.
 **Never delete the files before they are imported**: their data is not sent again (ask Sweeft if it happened).
 
@@ -53,21 +65,23 @@ only add deals, never remove them, so **once a month** delete the old ones: CRM 
 Columns with Bitrix's own names map by themselves. Create the others once in Bitrix as custom fields (product
 properties for products) and map them at import:
 
-- **Contacts:** Contact key, Loyalty card, Card discount %, Home store, Customer since, Purchases, Total spend,
-  First purchase, Last purchase, Average purchase, Purchases (last year), Spend (last year), Returns,
-  Favourite brand, Brands bought, Favourite category, Categories bought.
+- **Contacts:** Contact key, Loyalty card, Card discount %, Loyalty points, Card disabled, Home store, Customer since,
+  Purchases, Total spend, First purchase, Last purchase, Average purchase, Purchases (last year), Spend (last year),
+  Returns.
 - **Deals:** Contact key, Sale date (a date field), Sale time, Loyalty card, Store, Seller, Payment, Items,
   Brands, Categories.
-- **Products:** Brand, Color / line, Gender, Size, Volume, Barcode, Sold by.
+- **Products:** Brand, Color / line, Gender, Barcode, Sold by.
+- **Online contacts** (same contact fields, plus): Name on website, Website account, Registered on website, Last login,
+  Online orders, Online spend, Also a store customer.
 
 **Contact key** is the customer's id: a deal's buyer is always the contact with the same Contact key. The import
 links a deal to its contact by first and last name ("Contact"); when two contacts share a name that column is left
 empty, so the deal is not attached to the wrong person, and Contact key still says who bought.
-**Sale date** is the real date of the purchase: Bitrix may put the import day into Close date.
+**Sale date** is the real date of the purchase. The file has no Close date: Bitrix fills its own (often the import day).
 
-What the CRM can answer with this, for example: contacts with Favourite brand = TERENZI; contacts whose Brands bought
-contains LANCOME and Last purchase is over 6 months ago; deals whose Brands contains DIOR in the last 3 months, by
-Store or Seller; the best customers by Spend (last year).
+What the CRM can answer with this, for example: contacts whose Last purchase is over 6 months ago; deals whose Brands
+contains DIOR in the last 3 months, by Store or Seller (their contacts are the DIOR buyers); the best customers by
+Spend (last year).
 
 ## For developers
 
@@ -88,11 +102,12 @@ is accepted only for a local or private address.
 How it works: the server (`lutecia-heartbeat`) makes a bundle per pull with only the new or changed rows. The program
 fetches every bundle it has not had before (`POST /heartbeat/runs`, `GET /bundles`, `GET /bundles/:id/files/:name`, with
 `Authorization: Bearer <token>`) and merges each into one file per entity in `production/` (the server's `contacts.csv` and `deals.csv` are saved as
-`offline_contact.csv` and `offline_deals.csv`; `src/testslice.go` then rebuilds `test/` from them): a newer record replaces the one with the
+`offline_contacts.csv` and `offline_deals.csv`; `src/testslice.go` then rebuilds `test/` from them): a newer record replaces the one with the
 same key (products: External ID; contacts: Contact key; deals: Deal key, the deal's rows moved as a whole and its
-`ID` renumbered, since every bundle numbers its deals from 1). The list of downloaded bundles is kept in the user's
-settings folder (`lutecia-downloader/` in `%AppData%`, `~/Library/Application Support` or `~/.config`), one per
-server, so deleting the files never brings old data back.
+`ID` renumbered, since every bundle numbers its deals from 1). The list of downloaded bundles is kept next to the
+program (`.lutecia-downloaded-*.txt`), one per server: a fresh unzip downloads everything the server holds, each later
+click adds only what is new, and deleting the files or their folder never brings old data back. If the program's folder
+is deleted after an import, the next unzip downloads everything again: do not import those deals twice.
 
 **Starting over** (files deleted before import, or a fresh Bitrix portal): on the server run
 `node dist/cli.js run --full --force-full --with-personal-data` (see lutecia-heartbeat's README). The server then makes

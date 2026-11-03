@@ -126,11 +126,30 @@ func testConfig(t *testing.T, server string) config {
 	return config{Server: server, Token: token, Folder: t.TempDir(), State: filepath.Join(t.TempDir(), "downloaded.txt")}
 }
 
+// readRaw: a file's text as it is (files this program did not write, such as fixtures it must leave alone).
+func readRaw(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return string(b)
+}
+
+// read returns a file's text. Every .csv the client gets must start with a UTF-8 BOM (Windows Excel and Bitrix need it
+// to see Georgian as UTF-8): read fails the test without one, then returns the text after it.
 func read(t *testing.T, path string) string {
 	t.Helper()
 	b, err := os.ReadFile(path)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if strings.HasSuffix(path, ".csv") {
+		rest, ok := strings.CutPrefix(string(b), "\ufeff")
+		if !ok {
+			t.Fatalf("%s: no UTF-8 BOM", filepath.Base(path))
+		}
+		return rest
 	}
 	return string(b)
 }
@@ -147,15 +166,60 @@ func TestFoldsEveryNewBundleIntoOneFilePerEntity(t *testing.T) {
 		"IVF-P1,Lipstick,12.00\r\nIVF-P2,\"Perfume, 50ml\",99.00\r\nVST-P3,\"Gown\r\nlong\",5.00\r\n" { // CRLF file: CRLF inside quotes too
 		t.Fatalf("products: newer row must replace in place, new rows appended:\n%s", got)
 	}
-	if got := read(t, filepath.Join(cfg.production(), "offline_contact.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
+	if got := read(t, filepath.Join(cfg.production(), "offline_contacts.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
 		t.Fatalf("contacts: same Key in Comment = same contact:\n%s", got)
 	}
 	entries, _ := os.ReadDir(cfg.production())
 	if len(entries) != 2 {
 		t.Fatalf("the folder must hold only the two import files, got %d entries", len(entries))
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contact.csv", 1}}) {
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) {
 		t.Fatalf("import order and counts: %+v", res.Files)
+	}
+}
+
+// The five files the client gets since 2026-11-03: online_* arrive under their own names, merge by Deal key / Contact
+// key like the offline ones, and sit in Bitrix's import order (contacts before deals, offline before online).
+func TestOnlineFilesMergeAndSortNextToOffline(t *testing.T) {
+	dealsHead := "ID,Deal key,Deal name,Contact key,Product,Price,Quantity\r\n"
+	onlineContactsHead := "First name,Mobile,Contact key,Online orders\r\n"
+	f := &fake{ids: []string{"2026-11-03_030000", "2026-11-03_060000"}, files: map[string]map[string]string{
+		"2026-11-03_030000": {
+			"products.csv":        productsHead + "IVF-P1,Lipstick,10.00\r\n",
+			"contacts.csv":        contactsHead + "ილია,555,Key: C-IVF-7091\r\n",
+			"online_contacts.csv": onlineContactsHead + "Ana,599,P-1,1\r\n",
+			"deals.csv":           dealsHead + "1,IVF-R1,IVF-101 #1,P-1,Lipstick,10.00,1\r\n",
+			"online_deals.csv":    dealsHead + "1,WEB-21,WEB #21,P-1,Lipstick,10.00,1\r\n1,,,,Patch,5.00,1\r\n",
+		},
+		"2026-11-03_060000": {
+			"online_contacts.csv": onlineContactsHead + "Ana,599,P-1,2\r\n",
+			"online_deals.csv":    dealsHead + "1,WEB-22,WEB #22 2026-11-03,P-1,Lipstick,10.00,1\r\n",
+		},
+	}}
+	cfg := testConfig(t, newFake(t, f).URL)
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := []fileRows{{"products.csv", 1}, {"offline_contacts.csv", 1}, {"online_contacts.csv", 1},
+		{"offline_deals.csv", 1}, {"online_deals.csv", 2}}
+	if !reflect.DeepEqual(res.Files, want) {
+		t.Fatalf("five files, import order, counts: %+v", res.Files)
+	}
+	if got := read(t, filepath.Join(cfg.production(), "online_contacts.csv")); got != onlineContactsHead+"Ana,599,P-1,2\r\n" {
+		t.Fatalf("online contact: the newer row replaces the older one:\n%s", got)
+	}
+	if got := read(t, filepath.Join(cfg.production(), "online_deals.csv")); got != dealsHead+
+		"1,WEB-21,WEB #21,P-1,Lipstick,10.00,1\r\n1,,,,Patch,5.00,1\r\n2,WEB-22,WEB #22 2026-11-03,P-1,Lipstick,10.00,1\r\n" {
+		t.Fatalf("online deals: appended and renumbered:\n%s", got)
+	}
+	off, on := read(t, filepath.Join(cfg.production(), "offline_deals.csv")), read(t, filepath.Join(cfg.production(), "online_deals.csv"))
+	if strings.SplitN(off, "\r\n", 2)[0] != strings.SplitN(on, "\r\n", 2)[0] {
+		t.Fatal("offline and online deals must keep the same header")
+	}
+	if msg := summary(cfg, res); !strings.Contains(msg, "encoding UTF-8, separator comma") || !strings.Contains(msg, "products.csv, then offline_contacts.csv, then online_contacts.csv, "+
+		"then offline_deals.csv, then online_deals.csv") || !strings.Contains(msg, "2 deals") {
+		t.Fatalf("summary:\n%s", msg)
 	}
 }
 
@@ -170,7 +234,7 @@ func TestNotImportedYetMeansAddedToTheSameFiles(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contact.csv", 1}}) {
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) {
 		t.Fatalf("second click without importing must keep the first click's rows: %+v", res.Files)
 	}
 }
@@ -182,7 +246,7 @@ func TestImportedAndDeletedMeansNewFilesWithOnlyNewRows(t *testing.T) {
 		t.Fatal(err)
 	}
 	os.Remove(filepath.Join(cfg.production(), "products.csv")) // the client imported both, then deleted them
-	os.Remove(filepath.Join(cfg.production(), "offline_contact.csv"))
+	os.Remove(filepath.Join(cfg.production(), "offline_contacts.csv"))
 
 	res, err := run(cfg, noPull, io.Discard)
 	if err != nil || len(res.New) != 0 || len(res.Files) != 0 {
@@ -194,10 +258,10 @@ func TestImportedAndDeletedMeansNewFilesWithOnlyNewRows(t *testing.T) {
 
 	f.ids = append(f.ids, "2026-10-14_060000")
 	res, err = run(cfg, noPull, io.Discard)
-	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 2}, {"offline_contact.csv", 1}}) {
+	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 2}, {"offline_contacts.csv", 1}}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "products.csv, then offline_contact.csv") || !strings.Contains(msg, "2 products") {
+	if msg := summary(cfg, res); !strings.Contains(msg, "products.csv, then offline_contacts.csv") || !strings.Contains(msg, "2 products") {
 		t.Fatal(msg)
 	}
 }
@@ -340,10 +404,10 @@ func TestChangedColumnsStopWithoutMerging(t *testing.T) {
 	before := "External ID,Name,Price,Brand\r\nIVF-P1,Lipstick,10.00,Dior\r\n"
 	os.WriteFile(dst, []byte(before), 0o644)
 	os.WriteFile(src, []byte(productsHead+"IVF-P1,Lipstick,10.00\r\n"), 0o644) // Brand removed
-	if err := mergeCSV(dst, src); err == nil || !strings.Contains(err.Error(), "Import it into Bitrix24 and delete it") {
-		t.Fatalf("want a columns-changed error, got %v", err)
+	if err := mergeCSV(dst, src); err == nil || !strings.Contains(err.Error(), "older version") {
+		t.Fatalf("want an older-version error, got %v", err)
 	}
-	if read(t, dst) != before {
+	if readRaw(t, dst) != before {
 		t.Fatal("products.csv must be left as it was")
 	}
 }
@@ -376,7 +440,7 @@ func TestConfig(t *testing.T) {
 	os.WriteFile(filepath.Join(dir, ".env"), []byte("\ufeff# comment\r\nLUTECIA_SERVER=http://10.0.0.5:3000/\r\nLUTECIA_TOKEN=\"abc\"\r\n"), 0o600)
 	cfg, err := loadConfig(dir)
 	if err != nil || cfg.Server != "http://10.0.0.5:3000" || cfg.Token != "abc" ||
-		cfg.Folder != filepath.Join(dir, folderName) || !strings.Contains(cfg.State, "lutecia-downloader") {
+		cfg.Folder != filepath.Join(dir, folderName) || filepath.Dir(cfg.State) != dir {
 		t.Fatalf("%+v %v", cfg, err)
 	}
 	t.Setenv("LUTECIA_SERVER", "https://sync.example.com")

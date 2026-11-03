@@ -24,7 +24,7 @@ func writeTestSlice(production, test string) (made bool, err error) {
 	if products == nil {
 		return false, err
 	}
-	contacts, err := readIfThere(filepath.Join(production, "offline_contact.csv"))
+	contacts, err := readIfThere(filepath.Join(production, "offline_contacts.csv"))
 	if contacts == nil {
 		return false, err
 	}
@@ -104,7 +104,7 @@ func writeTestSlice(production, test string) (made bool, err error) {
 		rows [][]string
 	}{
 		{"products.csv", products, keep(products.rows, productName, names)},
-		{"offline_contact.csv", contacts, keep(contacts.rows, contactKey, keys)},
+		{"offline_contacts.csv", contacts, keep(contacts.rows, contactKey, keys)},
 		{"offline_deals.csv", deals, dealRows},
 	}
 	for _, f := range out {

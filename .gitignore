@@ -1,3 +1,4 @@
 # Settings with the token, and the downloaded customer data: never on GitHub.
 .env
 Lutecia for Bitrix/
+.lutecia-downloaded-*

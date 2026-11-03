@@ -6,8 +6,9 @@
 //
 // Bundles are deltas. The files hold everything downloaded and not imported yet: the client imports them, then
 // deletes them, and the next click starts new ones. A newer row replaces the row with the same key, so forgetting
-// to delete only re-imports some rows, never loses one. What was downloaded is remembered in the user's settings
-// folder (one list per server), so deleting the files or the folder never brings old data back.
+// to delete only re-imports some rows, never loses one. What was downloaded is remembered next to the program
+// (one list per server), so deleting the files or their folder never brings old data back, and a fresh unzip starts
+// from everything the server holds.
 //
 // Settings: LUTECIA_SERVER and LUTECIA_TOKEN in .env next to the program (environment variables win). The client
 // never has to find that (hidden) file: when it is missing, incomplete or its token is refused, the program makes
@@ -54,12 +55,14 @@ func (e settingsError) Error() string { return e.msg }
 var (
 	bundleID = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{6}$`)
 	fileName = regexp.MustCompile(`^[A-Za-z0-9_]+\.(csv|json|txt)$`)
-	// Bitrix needs this order: deals and contacts refer to products and companies by name.
-	importOrder = []string{"products.csv", "companies.csv", "offline_contact.csv", "offline_deals.csv", "b2b_deals.csv"}
-	nouns       = map[string]string{"products.csv": "products", "companies.csv": "companies", "offline_contact.csv": "contacts",
-		"offline_deals.csv": "deals", "b2b_deals.csv": "deals"}
+	// Bitrix needs this order: deals and contacts refer to products and companies by name, deals to contacts.
+	// online_*: the web shop's customers and orders; online_deals has exactly the columns of offline_deals.
+	importOrder = []string{"products.csv", "companies.csv", "offline_contacts.csv", "online_contacts.csv",
+		"offline_deals.csv", "online_deals.csv", "b2b_deals.csv"}
+	nouns = map[string]string{"products.csv": "products", "companies.csv": "companies", "offline_contacts.csv": "contacts",
+		"online_contacts.csv": "contacts", "offline_deals.csv": "deals", "online_deals.csv": "deals", "b2b_deals.csv": "deals"}
 	// The server's name for a file -> the name the client gets. Others keep their name.
-	localNames = map[string]string{"contacts.csv": "offline_contact.csv", "deals.csv": "offline_deals.csv"}
+	localNames = map[string]string{"contacts.csv": "offline_contacts.csv", "deals.csv": "offline_deals.csv"}
 )
 
 type config struct {
@@ -84,10 +87,11 @@ type fileRows struct {
 }
 
 type result struct {
-	New        []string   // bundles downloaded this time, oldest first
-	Files      []fileRows // what the folder holds now, in import order
-	TestReady  bool       // the test folder was made from these files just now
-	ExcelReady bool       // the excel folder holds a copy of each of these files
+	New           []string   // bundles downloaded this time, oldest first
+	Files         []fileRows // what the folder holds now, in import order
+	FirstDownload bool       // nothing was downloaded in this folder before
+	TestReady     bool       // the test folder was made from these files just now
+	ExcelReady    bool       // the excel folder holds a copy of each of these files
 }
 
 func (c config) production() string { return filepath.Join(c.Folder, productionName) }
@@ -144,6 +148,10 @@ func summary(cfg config, res result) string {
 		fmt.Fprintf(&b, "No new data since last time. The files from last time are still in the folder\n  %s\n"+
 			"If they are not imported into Bitrix24 yet, import them now.\n\n", cfg.production())
 	}
+	if res.FirstDownload && len(res.New) > 0 {
+		b.WriteString("This is the first download in this folder, so it holds everything. If these deals are already in\n" +
+			"Bitrix24, do not import offline_deals.csv or online_deals.csv again: they would be there twice.\n\n")
+	}
 	names := make([]string, len(res.Files))
 	for i, f := range res.Files {
 		noun := nouns[f.Name]
@@ -154,6 +162,8 @@ func summary(cfg config, res result) string {
 		names[i] = f.Name
 	}
 	fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
+	b.WriteString("In the Bitrix24 import choose: encoding UTF-8, separator comma.\n" +
+		"Do not open these files in Excel and never save them from Excel: that breaks Georgian letters and phone numbers.\n")
 	b.WriteString("When everything is imported, delete these files. The next time, new files are made.")
 	if res.ExcelReady {
 		fmt.Fprintf(&b, "\n\nTo look at the data, double-click the files in\n  %s\n"+
@@ -208,6 +218,7 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		return result{}, err
 	}
 	var res result
+	res.FirstDownload = len(done) == 0
 	for _, b := range list {
 		if done[b.ID] {
 			continue
@@ -386,12 +397,10 @@ func loadConfig(dir string) (config, error) {
 	if err := checkServer(cfg.Server); err != nil {
 		return cfg, settingsError{err.Error()}
 	}
-	base, err := os.UserConfigDir()
-	if err != nil {
-		base = dir
-	}
 	sum := sha256.Sum256([]byte(cfg.Server)) // one list per server: a test server's bundles never hide production's
-	cfg.State = filepath.Join(base, "lutecia-downloader", "downloaded-"+hex.EncodeToString(sum[:6])+".txt")
+	// Next to the program, not in the data folder: a fresh unzip downloads everything, and deleting imported files
+	// never brings old data back.
+	cfg.State = filepath.Join(dir, ".lutecia-downloaded-"+hex.EncodeToString(sum[:6])+".txt")
 	return cfg, nil
 }
 

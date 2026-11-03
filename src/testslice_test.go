@@ -50,7 +50,7 @@ func sliceFixture() map[string]string {
 	deal("C9", "Lone", "Item1")
 	deal("C10", "", "Item1")
 	deal("C11", "", "Item2")
-	return map[string]string{"products.csv": products.String(), "offline_contact.csv": contacts.String(), "offline_deals.csv": deals.String()}
+	return map[string]string{"products.csv": products.String(), "offline_contacts.csv": contacts.String(), "offline_deals.csv": deals.String()}
 }
 
 func TestSliceLinksUpAndLeavesProductionAlone(t *testing.T) {
@@ -62,12 +62,12 @@ func TestSliceLinksUpAndLeavesProductionAlone(t *testing.T) {
 	}
 
 	for name, want := range sliceFixture() {
-		if read(t, filepath.Join(prod, name)) != want {
+		if readRaw(t, filepath.Join(prod, name)) != want {
 			t.Fatalf("%s in production changed", name)
 		}
 	}
 	deals, _ := readCSV(filepath.Join(test, "offline_deals.csv"))
-	contacts, _ := readCSV(filepath.Join(test, "offline_contact.csv"))
+	contacts, _ := readCSV(filepath.Join(test, "offline_contacts.csv"))
 	products, _ := readCSV(filepath.Join(test, "products.csv"))
 	if !deals.crlf || !contacts.crlf || !products.crlf {
 		t.Fatal("the test files must keep the line endings of production")
@@ -130,13 +130,13 @@ func TestSliceLeftAloneWhenNothingUsable(t *testing.T) {
 	}
 	// a small update: one deal's buyer is not in it, another's product is not, a third would link but is too few
 	writeFiles(t, prod, map[string]string{
-		"offline_contact.csv": sliceContacts + "N,C1\r\n",
+		"offline_contacts.csv": sliceContacts + "N,C1\r\n",
 		"offline_deals.csv":   sliceDeals + "1,D1,S,X,C99,Item\r\n2,D2,S,N,C1,Unknown\r\n3,D3,S,N,C1,Item\r\n4,D4,S,,,Item\r\n",
 	})
 	if made, err := writeTestSlice(prod, test); err != nil || made {
 		t.Fatal(made, err)
 	}
-	if read(t, filepath.Join(test, "products.csv")) != "kept" {
+	if readRaw(t, filepath.Join(test, "products.csv")) != "kept" {
 		t.Fatal("the test folder must be left as it was")
 	}
 }
@@ -144,7 +144,7 @@ func TestSliceLeftAloneWhenNothingUsable(t *testing.T) {
 func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
-		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contact.csv"], "deals.csv": fx["offline_deals.csv"],
+		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"],
 		"IMPORT_ORDER.txt": "1. products.csv\r\n",
 	}}}
 	cfg := testConfig(t, newFake(t, f).URL)
@@ -152,10 +152,10 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 17}, {"offline_contact.csv", 12}, {"offline_deals.csv", 12}}) {
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 17}, {"offline_contacts.csv", 12}, {"offline_deals.csv", 12}}) {
 		t.Fatalf("%+v", res.Files)
 	}
-	want := []string{"offline_contact.csv", "offline_deals.csv", "products.csv"}
+	want := []string{"offline_contacts.csv", "offline_deals.csv", "products.csv"}
 	for _, dir := range []string{cfg.production(), cfg.test()} {
 		var got []string
 		entries, _ := os.ReadDir(dir)
@@ -174,7 +174,7 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 		t.Fatalf("the main folder must hold only excel, production and test, got %d", len(entries))
 	}
 	msg := summary(cfg, res)
-	for _, s := range []string{"products.csv, then offline_contact.csv, then offline_deals.csv", cfg.test(), "delete the test deals"} {
+	for _, s := range []string{"products.csv, then offline_contacts.csv, then offline_deals.csv", cfg.test(), "delete the test deals"} {
 		if !strings.Contains(msg, s) {
 			t.Fatalf("message lacks %q:\n%s", s, msg)
 		}
@@ -184,7 +184,7 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 func TestFailedTestSliceHarmsNothing(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
-		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contact.csv"],
+		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"],
 		"deals.csv": "ID,Deal key\r\n1,D1\r\n", // no Contact key or Product: the slice cannot be made
 	}}}
 	cfg := testConfig(t, newFake(t, f).URL)
@@ -208,7 +208,7 @@ func TestFailedTestSliceHarmsNothing(t *testing.T) {
 func TestEmptiedTestFolderIsRemade(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
-		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contact.csv"], "deals.csv": fx["offline_deals.csv"],
+		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"],
 	}}}
 	cfg := testConfig(t, newFake(t, f).URL)
 	if _, err := run(cfg, noPull, io.Discard); err != nil {
@@ -231,7 +231,63 @@ func TestSwapKeepsOldFolderWhenTheNewOneCannotMove(t *testing.T) {
 	if err := swapFolder(filepath.Join(dir, "missing"), dst); err == nil {
 		t.Fatal("want an error")
 	}
-	if read(t, filepath.Join(dst, "a.csv")) != "old" {
+	if readRaw(t, filepath.Join(dst, "a.csv")) != "old" {
 		t.Fatal("the old folder must be back")
+	}
+}
+
+func TestFirstClickInANewFolderGetsEverythingThenOnlyNew(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	srv := newFake(t, f).URL
+	home := func() config {
+		dir := t.TempDir()
+		writeFiles(t, dir, map[string]string{".env": "LUTECIA_SERVER=" + srv + "\nLUTECIA_TOKEN=" + token + "\n"})
+		cfg, err := loadConfig(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return cfg
+	}
+	first := home()
+	res, err := run(first, noPull, io.Discard)
+	if err != nil || len(res.New) != 1 || !strings.Contains(summary(first, res), "first download") {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if res, err := run(first, noPull, io.Discard); err != nil || len(res.New) != 0 || len(res.Files) == 0 {
+		t.Fatalf("second click: %+v %v", res, err)
+	}
+	f.ids = append(f.ids, "2026-10-14_060000")
+	res, err = run(first, noPull, io.Discard)
+	if err != nil || len(res.New) != 1 || strings.Contains(summary(first, res), "first download") {
+		t.Fatalf("new data: %+v %v", res, err)
+	}
+	// same computer, a fresh unzip somewhere else: everything again
+	if res, err := run(home(), noPull, io.Discard); err != nil || len(res.New) != 2 || len(res.Files) == 0 {
+		t.Fatalf("fresh folder: %+v %v", res, err)
+	}
+	// imported and deleted the data folder: old data stays away
+	os.RemoveAll(first.Folder)
+	if res, err := run(first, noPull, io.Discard); err != nil || len(res.New) != 0 || len(res.Files) != 0 {
+		t.Fatalf("after deleting: %+v %v", res, err)
+	}
+}
+
+func TestUTF8MarkerFromTheServerIsKept(t *testing.T) {
+	fx := sliceFixture()
+	const bom = "\ufeff"
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
+		"products.csv": bom + fx["products.csv"], "contacts.csv": bom + fx["offline_contacts.csv"], "deals.csv": bom + fx["offline_deals.csv"],
+	}}}
+	cfg := testConfig(t, newFake(t, f).URL)
+	if _, err := run(cfg, noPull, io.Discard); err != nil {
+		t.Fatal(err)
+	}
+	for _, p := range []string{filepath.Join(cfg.production(), "offline_deals.csv"), filepath.Join(cfg.test(), "offline_deals.csv")} {
+		if got := read(t, p); !strings.HasPrefix(got, "ID,") { // read() fails without the marker, and strips it
+			t.Fatalf("%s: only one marker, then the header; starts %q", p, got[:6])
+		}
+	}
+	if s := sheetXML(t, filepath.Join(cfg.excel(), "offline_deals.xlsx")); strings.Contains(s, bom) {
+		t.Fatal("the marker must not reach the Excel copy")
 	}
 }

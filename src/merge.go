@@ -15,12 +15,14 @@ import (
 
 // mergeCSV folds the rows of src (a newer bundle's file) into dst, the file the client imports; dst is created
 // when missing. A src row replaces the dst row with the same key in place; new keys are appended. Merging the
-// same src twice gives the same file. Both are written the way the server wrote src (BOM, line endings).
+// same src twice gives the same file. Written with src's line endings, and always as UTF-8 with a BOM, whatever the
+// server sent: without it Windows Excel reads the file as ANSI and garbles Georgian, and Bitrix may guess wrong too.
 func mergeCSV(dst, src string) error {
 	newer, err := readCSV(src)
 	if err != nil {
 		return fmt.Errorf("%s from the server: %w", filepath.Base(src), err)
 	}
+	newer.bom = true
 	older, err := readCSV(dst)
 	if errors.Is(err, os.ErrNotExist) {
 		return writeCSV(dst, newer)
@@ -31,7 +33,7 @@ func mergeCSV(dst, src string) error {
 	if !slices.Equal(older.header, newer.header) {
 		if older.rows, err = reshape(older, newer.header); err != nil {
 			// A column was removed or renamed: the two can't be one file. Nothing is merged or marked downloaded.
-			return fmt.Errorf("the columns of %s changed. Import it into Bitrix24 and delete it, then run this again", filepath.Base(dst))
+			return fmt.Errorf("the file %s is from an older version. Do not import it: tell Sweeft, and meanwhile unzip the program into a new, empty folder", filepath.Base(dst))
 		}
 	}
 
