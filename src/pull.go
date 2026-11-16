@@ -74,8 +74,14 @@ func pull(client *http.Client, cfg config, opts options) error {
 }
 
 // putCheckpoint tells the server this computer has every bundle up to id. The server never moves a checkpoint back.
-func putCheckpoint(client *http.Client, cfg config, id string) error {
-	body, _ := json.Marshal(map[string]string{"bundle": id})
+// folder: the dated folder those bundles went into, so the server adds this download to its map ("" = a baseline
+// from before checkpoints, not a download).
+func putCheckpoint(client *http.Client, cfg config, id, folder string) error {
+	req := map[string]string{"bundle": id}
+	if folder != "" {
+		req["folder"] = folder
+	}
+	body, _ := json.Marshal(req)
 	res, err := call(client, cfg, http.MethodPut, "/downloads/checkpoint", strings.NewReader(string(body)))
 	if err != nil {
 		return err

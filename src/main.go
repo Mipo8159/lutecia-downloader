@@ -88,6 +88,15 @@ type pending struct {
 	CheckpointAt  *string  `json:"checkpointAt"`
 	FirstDownload bool     `json:"firstDownload"`
 	Bundles       []bundle `json:"bundles"`
+	History       []struct {
+		N          int     `json:"n"`
+		At         string  `json:"at"`
+		Folder     string  `json:"folder"`
+		First      bool    `json:"first"`
+		FromBundle *string `json:"fromBundle"`
+		ToBundle   string  `json:"toBundle"`
+		Bundles    int     `json:"bundles"`
+	} `json:"history"`
 }
 
 type bundle struct {
@@ -120,6 +129,7 @@ func (c config) production() string { return filepath.Join(c.Folder, productionN
 func main() {
 	home := flag.String("home", "", "folder with .env and the output (default: this program's folder)")
 	noPull := flag.Bool("no-pull", false, "only download what the server already has; don't ask it to pull from APEX first")
+	history := flag.Bool("history", false, "only show this computer's downloads as the server records them; download nothing")
 	flag.Parse()
 	if *home == "" {
 		*home = exeDir()
@@ -128,7 +138,13 @@ func main() {
 	fmt.Print("Lutecia -> Bitrix24\n\n")
 	cfg, err := loadConfig(*home)
 	var res result
-	if err == nil {
+	if err == nil && *history {
+		if err = showHistory(cfg, os.Stdout); err == nil {
+			fmt.Print("\nPress Enter to close.")
+			bufio.NewReader(os.Stdin).ReadString('\n')
+			return
+		}
+	} else if err == nil {
 		res, err = run(cfg, options{Pull: !*noPull, PollEvery: 3 * time.Second, PullTimeout: 30 * time.Minute}, os.Stdout)
 	}
 	var settings settingsError
@@ -253,13 +269,14 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		return result{}, err
 	}
 	// A folder made but not yet on the list (the program stopped right after making it) still counts as downloaded.
-	if err := readManifests(cfg.Folder, done); err != nil {
+	folderOf, err := readManifests(cfg.Folder, done)
+	if err != nil {
 		return result{}, err
 	}
 	// Tell the server what this computer already has (a checkpoint lost on the way, a new office IP, a copy from
 	// before checkpoints). The server keeps the later of the two, so this never brings old data back.
 	if latest := newest(done); latest != "" {
-		if err := putCheckpoint(client, cfg, latest); err != nil {
+		if err := putCheckpoint(client, cfg, latest, folderOf[latest]); err != nil {
 			var fatal fatalError
 			if errors.As(err, &fatal) {
 				return result{}, err
@@ -282,8 +299,7 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 	}
 	res := result{FirstDownload: p.FirstDownload && len(done) == 0}
 	if p.Checkpoint != nil && bundleID.MatchString(*p.Checkpoint) {
-		c := *p.Checkpoint // 2026-11-03_165626 -> 2026-11-03 16:56
-		res.Since = c[:10] + " " + c[11:13] + ":" + c[13:15]
+		res.Since = dataTime(*p.Checkpoint)
 	}
 	if len(todo) > 0 {
 		fmt.Fprintln(out, "Downloading the new data ...")
@@ -325,6 +341,16 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	if res.Files, err = countFiles(tmp); err != nil {
 		return res, err
 	}
+	// A file with no rows (nothing changed there) is not something to import.
+	res.Files = slices.DeleteFunc(res.Files, func(f fileRows) bool {
+		return f.Rows == 0 && os.Remove(filepath.Join(tmp, f.Name)) == nil
+	})
+	if len(res.Files) == 0 {
+		// Nothing to import at all: no folder, and the checkpoint stays, so these bundles go into the next real
+		// folder and the server's map has no gap.
+		fmt.Fprintln(out, "The server's new data holds no changes.")
+		return res, nil
+	}
 	if res.ExcelReady, err = makeExcel(tmp, filepath.Join(tmp, excelName), res.Files); err != nil {
 		res.ExcelReady = false
 		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The import files are fine.\n", err)
@@ -361,7 +387,7 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 		return res, err // the folder's own list keeps it from coming again
 	}
 	// The folder is safe here and in the list above; if this fails, the next start sends it again.
-	if err := putCheckpoint(client, cfg, slices.Max(ids)); err != nil {
+	if err := putCheckpoint(client, cfg, slices.Max(ids), filepath.Base(dst)); err != nil {
 		fmt.Fprintf(out, "Note: the server could not record this download yet (%v); the next run tells it again.\n", err)
 	}
 	return res, nil
@@ -456,8 +482,9 @@ func removeLeftovers(folder string) {
 	}
 }
 
-// readManifests adds the bundles listed in each dated folder to done.
-func readManifests(folder string, done map[string]bool) error {
+// readManifests adds the bundles listed in each dated folder to done, and says which folder holds each.
+func readManifests(folder string, done map[string]bool) (folderOf map[string]string, err error) {
+	folderOf = map[string]string{}
 	names, err := datedFolders(folder)
 	for _, n := range names {
 		data, err := os.ReadFile(filepath.Join(folder, n, manifestName))
@@ -467,10 +494,45 @@ func readManifests(folder string, done map[string]bool) error {
 		for _, line := range strings.Split(string(data), "\n") {
 			if id := strings.TrimSpace(line); bundleID.MatchString(id) {
 				done[id] = true
+				folderOf[id] = n
 			}
 		}
 	}
-	return err
+	return folderOf, err
+}
+
+// showHistory prints the server's map of this computer's downloads: the first, then each next one.
+func showHistory(cfg config, out io.Writer) error {
+	client := &http.Client{Timeout: time.Minute}
+	var p pending
+	if err := getJSON(client, cfg, "/downloads", &p); err != nil {
+		return err
+	}
+	if len(p.History) == 0 {
+		fmt.Fprintf(out, "The server has no downloads from this address (%s) yet: the next one is the first, with everything.\n", p.Client)
+		return nil
+	}
+	fmt.Fprintf(out, "Downloads from this address (%s), as the server records them:\n\n", p.Client)
+	for _, h := range p.History {
+		what := "first download: everything"
+		if h.FromBundle != nil {
+			what = "new since " + dataTime(*h.FromBundle)
+		}
+		updates := "updates"
+		if h.Bundles == 1 {
+			updates = "update"
+		}
+		fmt.Fprintf(out, "  %d. %-30s %s, up to %s (%d %s)\n", h.N, h.Folder, what, dataTime(h.ToBundle), h.Bundles, updates)
+	}
+	return nil
+}
+
+// dataTime: bundle id 2026-11-03_165626 -> "2026-11-03 16:56".
+func dataTime(id string) string {
+	if !bundleID.MatchString(id) {
+		return id
+	}
+	return id[:10] + " " + id[11:13] + ":" + id[13:15]
 }
 
 // lock makes the lock file, or says another window is still at work. A lock older than staleLock is left over from

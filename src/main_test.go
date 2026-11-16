@@ -31,7 +31,9 @@ type fake struct {
 	// The checkpoint of the one client the tests play (heartbeat keeps one per IP), as DownloadsController does.
 	checkpoint string
 	puts       []string // every PUT /downloads/checkpoint, in order
-	putFail    int      // fail this many PUTs with a 500
+	folders    []string // the folder each of those PUTs named ("" = none)
+	history    []map[string]any
+	putFail    int // fail this many PUTs with a 500
 }
 
 func newFake(t *testing.T, f *fake) *httptest.Server {
@@ -86,15 +88,15 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			}
 			list = append(list, map[string]any{"id": id, "files": fs})
 		}
-		body := map[string]any{"client": "203.0.113.1", "checkpoint": nil, "checkpointAt": nil, "firstDownload": f.checkpoint == "", "bundles": list}
+		body := map[string]any{"client": "203.0.113.1", "checkpoint": nil, "checkpointAt": nil, "firstDownload": f.checkpoint == "", "bundles": list, "history": f.history}
 		if f.checkpoint != "" {
 			body["checkpoint"], body["checkpointAt"] = f.checkpoint, "2026-11-10T09:30:00"
 		}
 		json.NewEncoder(w).Encode(body)
 	case r.Method == "PUT" && r.URL.Path == "/downloads/checkpoint":
-		var b struct{ Bundle string }
+		var b struct{ Bundle, Folder string }
 		json.NewDecoder(r.Body).Decode(&b)
-		f.puts = append(f.puts, b.Bundle)
+		f.puts, f.folders = append(f.puts, b.Bundle), append(f.folders, b.Folder)
 		if f.putFail > 0 {
 			f.putFail--
 			w.WriteHeader(500)
@@ -110,6 +112,14 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if b.Bundle > f.checkpoint {
+			if b.Folder != "" { // as heartbeat: only a move with a folder is a download in the map
+				var from any
+				if f.checkpoint != "" {
+					from = f.checkpoint
+				}
+				f.history = append(f.history, map[string]any{"n": len(f.history) + 1, "at": "2026-11-16T10:00:00",
+					"folder": b.Folder, "first": from == nil, "fromBundle": from, "toBundle": b.Bundle, "bundles": 1})
+			}
 			f.checkpoint = b.Bundle
 		}
 		io.WriteString(w, `{}`)
@@ -224,8 +234,8 @@ func TestFoldsEveryNewBundleIntoOneFilePerEntity(t *testing.T) {
 	if !reflect.DeepEqual(names, []string{manifestName, "excel", "offline_contacts.csv", "products.csv"}) {
 		t.Fatalf("the folder must hold the two import files and their Excel copies: %v", names)
 	}
-	if f.checkpoint != "2026-10-14_060000" {
-		t.Fatalf("the server's checkpoint must move to the last bundle: %q", f.checkpoint)
+	if f.checkpoint != "2026-10-14_060000" || !reflect.DeepEqual(f.folders, []string{filepath.Base(res.Folder)}) {
+		t.Fatalf("the server's checkpoint must move to the last bundle, naming the folder: %q %v", f.checkpoint, f.folders)
 	}
 	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) {
 		t.Fatalf("import order and counts: %+v", res.Files)
@@ -376,8 +386,9 @@ func TestCopyFromBeforeCheckpointsKeepsItsBaseline(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) || res.FirstDownload {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if !reflect.DeepEqual(f.puts, []string{"2026-10-14_030000", "2026-10-14_060000"}) || f.checkpoint != "2026-10-14_060000" {
-		t.Fatalf("baseline first, then the new folder: %v %q", f.puts, f.checkpoint)
+	if !reflect.DeepEqual(f.puts, []string{"2026-10-14_030000", "2026-10-14_060000"}) || f.checkpoint != "2026-10-14_060000" ||
+		!reflect.DeepEqual(f.folders, []string{"", filepath.Base(res.Folder)}) {
+		t.Fatalf("baseline first (no folder: not a download), then the new folder: %v %v %q", f.puts, f.folders, f.checkpoint)
 	}
 	if readRaw(t, filepath.Join(cfg.production(), "products.csv")) != "old data" {
 		t.Fatal("production must be left alone")
@@ -401,6 +412,33 @@ func TestLostCheckpointIsSentAgainNotDownloadedAgain(t *testing.T) {
 	res, err := run(cfg, noPull, io.Discard)
 	if err != nil || res.Folder != "" || len(res.New) != 0 || f.checkpoint != "2026-10-14_030000" {
 		t.Fatalf("%+v %v %q", res, err, f.checkpoint)
+	}
+	if len(f.history) != 1 || f.history[0]["folder"] != filepath.Base(first.Folder) {
+		t.Fatalf("the re-sent checkpoint names its folder, so the map still has this download: %v", f.history)
+	}
+}
+
+// -history: the server's map of this computer's downloads, the first one first.
+func TestHistoryShowsTheFirstDownloadThenEachNextOne(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	var out strings.Builder
+	if err := showHistory(cfg, &out); err != nil || !strings.Contains(out.String(), "the next one is the first") {
+		t.Fatalf("%v %q", err, out.String())
+	}
+	first, _ := run(cfg, noPull, io.Discard)
+	f.ids = append(f.ids, "2026-10-14_060000")
+	next, _ := run(cfg, noPull, io.Discard)
+	out.Reset()
+	if err := showHistory(cfg, &out); err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{"(203.0.113.1)",
+		"1. " + filepath.Base(first.Folder), "first download: everything, up to 2026-10-14 03:00",
+		"2. " + filepath.Base(next.Folder), "new since 2026-10-14 03:00, up to 2026-10-14 06:00"} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("lacks %q:\n%s", want, out.String())
+		}
 	}
 }
 
@@ -443,6 +481,39 @@ func TestFolderMadeButNotListedDoesNotComeAgain(t *testing.T) {
 	res, err := run(cfg, noPull, io.Discard)
 	if err != nil || res.Folder != "" || f.checkpoint != "2026-10-14_030000" {
 		t.Fatalf("%+v %v %q", res, err, f.checkpoint)
+	}
+}
+
+// A bundle where nothing changed in an entity still has that file, header only: it is left out of the folder. When
+// nothing has rows, no folder is made and the checkpoint stays, so those bundles go into the next real folder.
+func TestEmptyFilesAreLeftOutAndAnAllEmptyDownloadWaits(t *testing.T) {
+	files := twoBundles()
+	files["2026-10-14_090000"] = map[string]string{"products.csv": productsHead, "contacts.csv": contactsHead}
+	files["2026-10-14_120000"] = map[string]string{"products.csv": productsHead, "contacts.csv": contactsHead + "ანა,599,Key: C-1\r\n"}
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: files}
+	cfg := testConfig(t, newFake(t, f).URL)
+	run(cfg, noPull, io.Discard)
+
+	f.ids = append(f.ids, "2026-10-14_090000")
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder != "" || f.checkpoint != "2026-10-14_030000" || len(f.history) != 1 {
+		t.Fatalf("all empty: no folder, checkpoint stays: %+v %v %q", res, err, f.checkpoint)
+	}
+	if names, _ := datedFolders(cfg.Folder); len(names) != 1 {
+		t.Fatal(names)
+	}
+
+	f.ids = append(f.ids, "2026-10-14_120000")
+	res, err = run(cfg, noPull, io.Discard)
+	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"offline_contacts.csv", 1}}) ||
+		!reflect.DeepEqual(res.New, []string{"2026-10-14_090000", "2026-10-14_120000"}) {
+		t.Fatalf("the waiting bundle comes with the next folder, empty files left out: %+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(res.Folder, "products.csv")); err == nil {
+		t.Fatal("no empty products.csv")
+	}
+	if f.checkpoint != "2026-10-14_120000" || len(f.history) != 2 || f.history[1]["fromBundle"] != "2026-10-14_030000" {
+		t.Fatalf("the map stays without gaps: %v", f.history)
 	}
 }
 

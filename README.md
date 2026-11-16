@@ -131,6 +131,10 @@ back). That covers a checkpoint lost on the way, a changed office IP, and copies
 `production` folder is their baseline). Several computers behind one office IP share one checkpoint: one office, one
 downloader.
 
+The confirming `PUT` names the folder, so the server keeps a map of each office's downloads: the first ("everything"),
+then each next one with the data it holds. `./Lutecia.command -history` (Windows: `Lutecia.exe -history`) prints this
+computer's map and downloads nothing.
+
 **Starting over** (files deleted before import, or a fresh Bitrix portal): on the server run
 `node dist/cli.js run --full --force-full --with-personal-data` (see lutecia-heartbeat's README). The server then makes
 one bundle with everything (all products and contacts, the last year of deals); the client's next normal
