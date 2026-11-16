@@ -12,6 +12,10 @@
 // checkpoint. So a checkpoint lost on the way, a changed office IP, or a copy that downloaded before checkpoints
 // existed (its "production" folder is its baseline) never gets old data again.
 //
+// -fresh starts over: the server forgets this computer's downloads (DELETE /downloads/checkpoint, this IP only), the
+// earlier folders and the list move into "Lutecia for Bitrix/Before fresh start <date time>", and the run is a first
+// download again, with everything.
+//
 // Settings: LUTECIA_SERVER and LUTECIA_TOKEN in .env next to the program (environment variables win). The client
 // never has to find that (hidden) file: when it is missing, incomplete or its token is refused, the program makes
 // it from env.example where needed and opens it in Notepad / TextEdit.
@@ -22,6 +26,7 @@ import (
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
@@ -46,6 +51,7 @@ const (
 	excelName      = "excel"
 	stampLayout    = "2006-01-02 15-04"     // a dated folder's name: no ':' (Windows), and name order is time order
 	everything     = " (everything)"        // the first download's folder
+	freshPrefix    = "Before fresh start "  // -fresh moves what this computer had into "<prefix><date time>"
 	manifestName   = ".lutecia-bundles.txt" // in a dated folder: the bundles it holds
 	lockName       = ".lutecia-running"     // in "Lutecia for Bitrix" while a download runs
 	staleLock      = 2 * time.Hour          // longer than any run (the pull wait stops at 30 minutes)
@@ -130,6 +136,8 @@ func main() {
 	home := flag.String("home", "", "folder with .env and the output (default: this program's folder)")
 	noPull := flag.Bool("no-pull", false, "only download what the server already has; don't ask it to pull from APEX first")
 	history := flag.Bool("history", false, "only show this computer's downloads as the server records them; download nothing")
+	fresh := flag.Bool("fresh", false, "start over: the server forgets this computer's downloads and this one holds everything\n"+
+		"(the earlier folders move into \""+freshPrefix+"<date time>\")")
 	flag.Parse()
 	if *home == "" {
 		*home = exeDir()
@@ -145,7 +153,7 @@ func main() {
 			return
 		}
 	} else if err == nil {
-		res, err = run(cfg, options{Pull: !*noPull, PollEvery: 3 * time.Second, PullTimeout: 30 * time.Minute}, os.Stdout)
+		res, err = run(cfg, options{Pull: !*noPull, Fresh: *fresh, PollEvery: 3 * time.Second, PullTimeout: 30 * time.Minute}, os.Stdout)
 	}
 	var settings settingsError
 	if errors.As(err, &settings) {
@@ -229,6 +237,7 @@ func summary(cfg config, res result) string {
 
 type options struct {
 	Pull        bool          // ask the server for a fresh APEX pull first
+	Fresh       bool          // start over first (-fresh): this download is a first one, with everything
 	PollEvery   time.Duration // how often to check on that pull
 	PullTimeout time.Duration // stop waiting (the pull goes on; its data comes with the next click)
 }
@@ -264,6 +273,14 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		}
 	}
 
+	// After the pull (seconds, not minutes, before the server is asked what is new: another computer on this IP has
+	// little time to move the checkpoint in between) and before anything reads what this computer has (otherwise its
+	// old place would be sent to the server again).
+	if opts.Fresh {
+		if err := freshStart(client, cfg, out); err != nil {
+			return result{}, err
+		}
+	}
 	done, err := readState(cfg.State)
 	if err != nil {
 		return result{}, err
@@ -373,13 +390,7 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	for i := 2; exists(dst); i++ { // two downloads in one minute
 		dst = filepath.Join(cfg.Folder, fmt.Sprintf("%s (%d)", name, i))
 	}
-	// Windows: an antivirus or the search indexer may still hold a just-written file for a moment.
-	err = os.Rename(tmp, dst)
-	for i := 0; err != nil && i < 5; i++ {
-		time.Sleep(time.Second)
-		err = os.Rename(tmp, dst)
-	}
-	if err != nil {
+	if err := rename(tmp, dst); err != nil {
 		return res, fmt.Errorf("the new folder could not be put in place (%v). Nothing was lost: just run this again", err)
 	}
 	res.Folder, res.New = dst, ids
@@ -392,6 +403,79 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	}
 	return res, nil
 }
+
+// rename retries for a few seconds: on Windows an antivirus or the search indexer may still hold a just-written file.
+func rename(from, to string) error {
+	err := os.Rename(from, to)
+	for i := 0; err != nil && i < 5; i++ {
+		time.Sleep(time.Second)
+		err = os.Rename(from, to)
+	}
+	return err
+}
+
+// freshStart (-fresh): the server forgets this computer's downloads, and everything this computer remembers of them
+// (the dated folders, an old "production" folder, the list of downloaded bundles) moves into one "Before fresh
+// start <date time>" folder, which nothing here reads. So this run is a first download with everything.
+// The server goes first. If a move fails, what was already moved goes back: this computer is as it was, and the next
+// plain run tells the server the old place again, so nothing is hidden or lost.
+func freshStart(client *http.Client, cfg config, out io.Writer) error {
+	res, err := call(client, cfg, http.MethodDelete, "/downloads/checkpoint", nil)
+	if err != nil {
+		return err
+	}
+	var gone struct {
+		Downloads int `json:"downloads"`
+	}
+	err = json.NewDecoder(res.Body).Decode(&gone)
+	res.Body.Close()
+	if res.StatusCode != http.StatusOK || err != nil {
+		return fmt.Errorf("the server did not start over (%s). Nothing was changed", res.Status)
+	}
+	fmt.Fprintf(out, "Fresh start: the server forgot this computer's %d earlier downloads.\n", gone.Downloads)
+
+	names, err := datedFolders(cfg.Folder)
+	if err != nil {
+		return err
+	}
+	var move []string
+	for _, n := range append(names, productionName, excelName, testName) {
+		if p := filepath.Join(cfg.Folder, n); exists(p) {
+			move = append(move, p)
+		}
+	}
+	if exists(cfg.State) {
+		move = append(move, cfg.State)
+	}
+	if len(move) == 0 {
+		return nil
+	}
+	dir := filepath.Join(cfg.Folder, freshPrefix+time.Now().Format(stampLayout))
+	for i, base := 2, dir; exists(dir); i++ {
+		dir = fmt.Sprintf("%s (%d)", base, i)
+	}
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		return err
+	}
+	for i, p := range move {
+		if err := moveAside(p, filepath.Join(dir, filepath.Base(p))); err != nil {
+			for j := i - 1; j >= 0; j-- {
+				if berr := rename(filepath.Join(dir, filepath.Base(move[j])), move[j]); berr != nil {
+					return fmt.Errorf("could not move %s aside (%v), nor %s back (%v). Move everything in\n  %s\nback by hand, "+
+						"then run with -fresh again", filepath.Base(p), err, filepath.Base(move[j]), berr, dir)
+				}
+			}
+			os.Remove(dir)
+			return fmt.Errorf("could not move %s aside (%v); nothing was moved. Close it if it is open in Excel, "+
+				"then run with -fresh again", filepath.Base(p), err)
+		}
+	}
+	fmt.Fprintf(out, "What this computer had is now in\n  %s\nDelete that folder once you no longer need it.\n", dir)
+	return nil
+}
+
+// moveAside is rename; a test swaps it to see that a failed move puts everything back.
+var moveAside = rename
 
 // makeExcel is syncExcel; a test swaps it to see that a failed copy harms nothing.
 var makeExcel = syncExcel

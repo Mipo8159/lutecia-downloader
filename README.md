@@ -135,6 +135,14 @@ The confirming `PUT` names the folder, so the server keeps a map of each office'
 then each next one with the data it holds. `./Lutecia.command -history` (Windows: `Lutecia.exe -history`) prints this
 computer's map and downloads nothing.
 
+**Fresh start** (`./Lutecia.command -fresh`, Windows: `Lutecia.exe -fresh`; on purpose not a double-click): the
+server forgets this office's checkpoint and map (`DELETE /downloads/checkpoint`, this IP only), then every dated
+folder, an old `production` folder and the downloaded list move into `Lutecia for Bitrix/Before fresh start <date
+time>/` (nothing reads it; delete it when done), and this run is a first download: `<date time> (everything)` with
+`test/`, entry 1 of the map. Server first: if the server refuses, nothing moves; if a move fails (a file open in
+Excel), what was moved goes back, so a plain double-click is safe; close the file and run `-fresh` again. Delete
+the aside folder as a whole: it holds customer data, and its Excel copies are not cleaned up like the dated ones'. Deals already in Bitrix double if the new folder's deal files are imported.
+
 **Starting over** (files deleted before import, or a fresh Bitrix portal): on the server run
 `node dist/cli.js run --full --force-full --with-personal-data` (see lutecia-heartbeat's README). The server then makes
 one bundle with everything (all products and contacts, the last year of deals); the client's next normal

@@ -33,7 +33,9 @@ type fake struct {
 	puts       []string // every PUT /downloads/checkpoint, in order
 	folders    []string // the folder each of those PUTs named ("" = none)
 	history    []map[string]any
-	putFail    int // fail this many PUTs with a 500
+	putFail    int  // fail this many PUTs with a 500
+	deletes    int  // DELETE /downloads/checkpoint calls (-fresh)
+	deleteFail bool // ... answered with a 500
 }
 
 func newFake(t *testing.T, f *fake) *httptest.Server {
@@ -93,6 +95,15 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			body["checkpoint"], body["checkpointAt"] = f.checkpoint, "2026-11-10T09:30:00"
 		}
 		json.NewEncoder(w).Encode(body)
+	case r.Method == "DELETE" && r.URL.Path == "/downloads/checkpoint":
+		f.deletes++
+		if f.deleteFail {
+			w.WriteHeader(500)
+			return
+		}
+		n := len(f.history)
+		f.checkpoint, f.history = "", nil
+		json.NewEncoder(w).Encode(map[string]any{"client": "203.0.113.1", "checkpoints": 1, "downloads": n})
 	case r.Method == "PUT" && r.URL.Path == "/downloads/checkpoint":
 		var b struct{ Bundle, Folder string }
 		json.NewDecoder(r.Body).Decode(&b)
@@ -717,5 +728,128 @@ func TestPlainHTTPOnlyInsideAPrivateNetwork(t *testing.T) {
 		if err := checkServer(server); (err == nil) != ok {
 			t.Errorf("%s: %v", server, err)
 		}
+	}
+}
+
+// -fresh: the server forgets this computer, what it had moves aside, and the download holds everything again, as the
+// very first one did (with the test set), and is entry 1 of the map.
+func TestFreshStartGivesEverythingAgainAndPutsTheOldFoldersAside(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ids = append(f.ids, "2026-10-14_060000")
+	second, err := run(cfg, noPull, io.Discard)
+	if err != nil || second.Folder == "" || len(f.history) != 2 {
+		t.Fatal(second, err)
+	}
+	os.MkdirAll(filepath.Join(cfg.Folder, productionName), 0o755) // an old copy's folder goes aside too
+	os.WriteFile(filepath.Join(cfg.Folder, productionName, "products.csv"), []byte(productsHead+"A,B,1.00\r\n"), 0o644)
+
+	var out strings.Builder
+	before := len(f.puts)
+	res, err := run(cfg, options{Fresh: true}, &out)
+	if err != nil || f.deletes != 1 {
+		t.Fatal(err, f.deletes)
+	}
+	if !res.FirstDownload || !strings.HasSuffix(res.Folder, everything) || !reflect.DeepEqual(res.New, f.ids) {
+		t.Fatalf("a first download with everything: %+v", res)
+	}
+	if !reflect.DeepEqual(res.Waiting, []string{filepath.Base(res.Folder)}) {
+		t.Fatalf("only the new folder waits to be imported: %v", res.Waiting)
+	}
+	aside, _ := filepath.Glob(filepath.Join(cfg.Folder, freshPrefix+"*"))
+	if len(aside) != 1 {
+		t.Fatalf("one folder with what this computer had: %v", aside)
+	}
+	for _, n := range []string{filepath.Base(first.Folder), filepath.Base(second.Folder), productionName, filepath.Base(cfg.State)} {
+		if !exists(filepath.Join(aside[0], n)) {
+			t.Fatalf("%s should be in %s", n, aside[0])
+		}
+	}
+	if done, _ := readState(cfg.State); len(done) != 2 {
+		t.Fatalf("a new list with this download only: %v", done)
+	}
+	if len(f.history) != 1 || f.history[0]["first"] != true || f.history[0]["folder"] != filepath.Base(res.Folder) {
+		t.Fatalf("the map starts again at 1: %v", f.history)
+	}
+	if !reflect.DeepEqual(f.puts[before:], []string{"2026-10-14_060000"}) || !reflect.DeepEqual(f.folders[before:], []string{filepath.Base(res.Folder)}) {
+		t.Fatalf("after the fresh start only the new folder is sent, not the old place: %v %v", f.puts[before:], f.folders[before:])
+	}
+	for _, want := range []string{"forgot this computer's 2 earlier downloads", aside[0]} {
+		if !strings.Contains(out.String(), want) {
+			t.Fatalf("output lacks %q:\n%s", want, out.String())
+		}
+	}
+
+	// the next plain run carries on from the fresh one
+	f.ids = append(f.ids, "2026-10-14_090000")
+	f.files["2026-10-14_090000"] = f.files["2026-10-14_060000"]
+	next, err := run(cfg, noPull, io.Discard)
+	if err != nil || !reflect.DeepEqual(next.New, []string{"2026-10-14_090000"}) || len(f.history) != 2 {
+		t.Fatalf("%+v %v %v", next, err, f.history)
+	}
+}
+
+// A server that does not start over: nothing on this computer moves, and nothing is downloaded.
+func TestFreshStartThatTheServerRefusesChangesNothing(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.deleteFail = true
+	if _, err := run(cfg, options{Fresh: true}, io.Discard); err == nil || !strings.Contains(err.Error(), "did not start over") {
+		t.Fatalf("want the refusal, got %v", err)
+	}
+	if !exists(first.Folder) || f.checkpoint != "2026-10-14_030000" {
+		t.Fatal("the folder and the checkpoint must stay")
+	}
+	if done, _ := readState(cfg.State); !done["2026-10-14_030000"] {
+		t.Fatal("the list must stay")
+	}
+	if aside, _ := filepath.Glob(filepath.Join(cfg.Folder, freshPrefix+"*")); len(aside) != 0 {
+		t.Fatalf("nothing moved aside: %v", aside)
+	}
+}
+
+// A move that fails halfway (a file open in Excel on Windows) puts back what was moved: a plain run afterwards sees
+// every folder and tells the server its old place again, so nothing is hidden.
+func TestFreshStartThatCannotMoveEverythingPutsItAllBack(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.ids = append(f.ids, "2026-10-14_060000")
+	second, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	calls := 0
+	moveAside = func(from, to string) error {
+		if calls++; calls == 2 {
+			return errors.New("the file is open in another program")
+		}
+		return rename(from, to)
+	}
+	t.Cleanup(func() { moveAside = rename })
+	if _, err := run(cfg, options{Fresh: true}, io.Discard); err == nil || !strings.Contains(err.Error(), "nothing was moved") {
+		t.Fatalf("want the failed move, got %v", err)
+	}
+	if !exists(first.Folder) || !exists(second.Folder) {
+		t.Fatal("both folders must be back in place")
+	}
+	if aside, _ := filepath.Glob(filepath.Join(cfg.Folder, freshPrefix+"*")); len(aside) != 0 {
+		t.Fatalf("no half-filled aside folder: %v", aside)
+	}
+	moveAside = rename
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder != "" || f.checkpoint != "2026-10-14_060000" || len(res.Waiting) != 2 {
+		t.Fatalf("a plain run puts the server back at the old place and lists both folders: %+v %v %q", res, err, f.checkpoint)
 	}
 }
