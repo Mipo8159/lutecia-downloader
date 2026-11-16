@@ -25,18 +25,28 @@ itself if something in it is wrong (for example a changed access key).
 ## Every time you need fresh data
 
 Double-click **Lutecia**. It asks the server for the latest data (a timer shows it is working), says **DONE** with
-the numbers, and opens the folder **`Lutecia for Bitrix`** (next to the program). It holds up to three folders with the same three sets of data:
+the numbers, and opens a **new folder** inside **`Lutecia for Bitrix`** (next to the program), named after the date and
+time of the download:
 
+```
+Lutecia for Bitrix/
+  2026-11-16 14-05 (everything)/   the first download on this computer: all the data
+  2026-11-17 09-30/                the next one: only what is new or changed since 2026-11-16 14-05
+  2026-11-18 10-12/                ... since 2026-11-17 09-30
+```
+
+The server remembers when this office last downloaded, so each folder holds only what came after the folder before
+it. **Import the folders oldest first, each one once, then delete it.** A folder holds:
+
+- the files to import (`products.csv`, `offline_contacts.csv`, ...). If you open one in Excel, don't save it.
 - **`excel`**: copies for looking at the data. Double-click them; Georgian text, columns and barcodes show correctly.
-  Never import these into Bitrix. The program overwrites them, so save your own work elsewhere. Delete them together
-  with the `production` files: they hold customer data (the next double-click also removes them).
-- **`production`**: the real data, the files to import. If you open one in Excel, don't save it.
-- **`test`**: a small part of it (about 10 deals, their buyers and their products) for trying an import. The test
-  deals have names starting with `TEST`: delete them in Bitrix before importing `production`, or those deals are there
-  twice. Delete the `test` folder when you finish testing, because it holds customer data. It is remade only when
-  `production` has enough data, and the closing message says when it is ready. Temporary: may be dropped later.
+  Never import these into Bitrix. They hold customer data: delete them with the folder (if you delete only the
+  import files, the next double-click removes the copies).
+- **`test`** (only in the first, "everything" folder): a small part of it (about 10 deals, their buyers and their
+  products) for trying an import. The test deals have names starting with `TEST`: delete them in Bitrix before
+  importing the real files, or those deals are there twice. Temporary: may be dropped later.
 
-Import the files from `production` into Bitrix24 **in this order**, then **delete them**:
+Import the files of each folder into Bitrix24 **in this order**, then **delete the folder**:
 
 1. `products.csv` (CRM → Products → Import)
 2. `offline_contacts.csv` (CRM → Contacts → Import)
@@ -53,10 +63,15 @@ correctly), but **never open and save them in Excel** before importing: Excel sa
 which breaks Georgian letters and turns phones like +995599123456 into numbers. To look at the data use the `excel`
 folder (phones and barcodes stay text there).
 
-Each double-click brings only what is new or changed since the last one. Keep the program in its folder: a new unzip
-starts over with everything, so never import those deals again if they are already in Bitrix (the program warns you).
-Forgot to import before double-clicking again? Nothing is lost: the new data is added to the same files.
-**Never delete the files before they are imported**: their data is not sent again (ask Sweeft if it happened).
+Each double-click brings only what is new or changed since the last download, in its own folder; nothing new = no
+folder ("Everything is up to date"). Forgot to import before double-clicking again? Nothing is lost: import the older
+folder first, then the newer one (the closing message lists the folders still there). A new unzip in the same office
+also gets only what is new, because the server knows the office. **Never delete a folder before it is imported**: its
+data is not sent again (ask Sweeft if it happened).
+
+Copies from before 2026-11-16 have one `production` folder that every download was merged into. It stays as it was:
+the first double-click of the new program tells the server what it holds, and from then on new data arrives in dated
+folders. Import `production` first if it is not imported yet.
 
 `offline_deals.csv` holds the purchases of the last year (one deal per receipt, its products as rows). Bitrix import can
 only add deals, never remove them, so **once a month** delete the old ones: CRM → Deals → list view → filter
@@ -99,15 +114,22 @@ After changing `src/`, run `./build.sh` and commit both files with the source.
 Production servers need `https://` in `LUTECIA_SERVER`: the token goes with every request, so plain `http://`
 is accepted only for a local or private address.
 
-How it works: the server (`lutecia-heartbeat`) makes a bundle per pull with only the new or changed rows. The program
-fetches every bundle it has not had before (`POST /heartbeat/runs`, `GET /bundles`, `GET /bundles/:id/files/:name`, with
-`Authorization: Bearer <token>`) and merges each into one file per entity in `production/` (the server's `contacts.csv` and `deals.csv` are saved as
-`offline_contacts.csv` and `offline_deals.csv`; `src/testslice.go` then rebuilds `test/` from them): a newer record replaces the one with the
-same key (products: External ID; contacts: Contact key; deals: Deal key, the deal's rows moved as a whole and its
-`ID` renumbered, since every bundle numbers its deals from 1). The list of downloaded bundles is kept next to the
-program (`.lutecia-downloaded-*.txt`), one per server: a fresh unzip downloads everything the server holds, each later
-click adds only what is new, and deleting the files or their folder never brings old data back. If the program's folder
-is deleted after an import, the next unzip downloads everything again: do not import those deals twice.
+How it works: the server (`lutecia-heartbeat`) makes a bundle per pull with only the new or changed rows, and keeps a
+**checkpoint per client IP**: the last bundle that client finished downloading. Each click: `POST /heartbeat/runs` (and
+wait), `GET /downloads` (the committed bundles after this IP's checkpoint; all of them the first time),
+`GET /bundles/:id/files/:name` for each, then `PUT /downloads/checkpoint {"bundle": <last id>}`, all with
+`Authorization: Bearer <token>`. The bundles are merged into one file per entity in a new dated folder (the server's
+`contacts.csv` and `deals.csv` are saved as `offline_contacts.csv` and `offline_deals.csv`): a newer record replaces
+the one with the same key (products: External ID; contacts: Contact key; deals: Deal key, the deal's rows moved as a
+whole and its `ID` renumbered, since every bundle numbers its deals from 1). The folder is built under a hidden
+`.<name>.partial-*` name and renamed only when complete; the checkpoint moves only after that, so a cut download
+neither skips nor repeats data.
+
+The downloaded bundle ids are also listed next to the program (`.lutecia-downloaded-*.txt`, one list per server). On
+start the newest is sent to the server as this computer's checkpoint (the server keeps the later one, never moves
+back). That covers a checkpoint lost on the way, a changed office IP, and copies from before checkpoints (their
+`production` folder is their baseline). Several computers behind one office IP share one checkpoint: one office, one
+downloader.
 
 **Starting over** (files deleted before import, or a fresh Bitrix portal): on the server run
 `node dist/cli.js run --full --force-full --with-personal-data` (see lutecia-heartbeat's README). The server then makes

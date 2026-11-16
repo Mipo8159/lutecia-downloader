@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"slices"
 	"strings"
 	"testing"
 )
@@ -131,7 +132,7 @@ func TestSliceLeftAloneWhenNothingUsable(t *testing.T) {
 	// a small update: one deal's buyer is not in it, another's product is not, a third would link but is too few
 	writeFiles(t, prod, map[string]string{
 		"offline_contacts.csv": sliceContacts + "N,C1\r\n",
-		"offline_deals.csv":   sliceDeals + "1,D1,S,X,C99,Item\r\n2,D2,S,N,C1,Unknown\r\n3,D3,S,N,C1,Item\r\n4,D4,S,,,Item\r\n",
+		"offline_deals.csv":    sliceDeals + "1,D1,S,X,C99,Item\r\n2,D2,S,N,C1,Unknown\r\n3,D3,S,N,C1,Item\r\n4,D4,S,,,Item\r\n",
 	})
 	if made, err := writeTestSlice(prod, test); err != nil || made {
 		t.Fatal(made, err)
@@ -156,12 +157,13 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 		t.Fatalf("%+v", res.Files)
 	}
 	want := []string{"offline_contacts.csv", "offline_deals.csv", "products.csv"}
-	for _, dir := range []string{cfg.production(), cfg.test()} {
+	for _, dir := range []string{res.Folder, filepath.Join(res.Folder, testName)} {
 		var got []string
 		entries, _ := os.ReadDir(dir)
 		for _, e := range entries {
 			got = append(got, e.Name())
 		}
+		got = slices.DeleteFunc(got, func(n string) bool { return n == excelName || n == testName || n == manifestName })
 		if !reflect.DeepEqual(got, want) {
 			t.Fatalf("%s holds %v", dir, got)
 		}
@@ -170,11 +172,11 @@ func TestDownloadMakesProductionAndTestWithTheAgreedNames(t *testing.T) {
 		t.Fatal("the test folder was just made")
 	}
 	entries, _ := os.ReadDir(cfg.Folder)
-	if len(entries) != 3 {
-		t.Fatalf("the main folder must hold only excel, production and test, got %d", len(entries))
+	if len(entries) != 1 {
+		t.Fatalf("the main folder must hold only the dated folder, got %d", len(entries))
 	}
 	msg := summary(cfg, res)
-	for _, s := range []string{"products.csv, then offline_contacts.csv, then offline_deals.csv", cfg.test(), "delete the test deals"} {
+	for _, s := range []string{"products.csv, then offline_contacts.csv, then offline_deals.csv", filepath.Join(res.Folder, testName), "delete the test deals"} {
 		if !strings.Contains(msg, s) {
 			t.Fatalf("message lacks %q:\n%s", s, msg)
 		}
@@ -190,10 +192,10 @@ func TestFailedTestSliceHarmsNothing(t *testing.T) {
 	cfg := testConfig(t, newFake(t, f).URL)
 	var out strings.Builder
 	res, err := run(cfg, noPull, &out)
-	if err != nil || res.TestReady || !strings.Contains(out.String(), "production files are fine") {
+	if err != nil || res.TestReady || !strings.Contains(out.String(), "import files are fine") {
 		t.Fatalf("%+v %v %q", res, err, out.String())
 	}
-	if read(t, filepath.Join(cfg.production(), "products.csv")) != fx["products.csv"] || len(res.Files) != 3 {
+	if read(t, filepath.Join(res.Folder, "products.csv")) != fx["products.csv"] || len(res.Files) != 3 {
 		t.Fatalf("production must be intact: %+v", res.Files)
 	}
 	done, _ := readState(cfg.State)
@@ -205,22 +207,24 @@ func TestFailedTestSliceHarmsNothing(t *testing.T) {
 	}
 }
 
-func TestEmptiedTestFolderIsRemade(t *testing.T) {
+// The test set is for trying the first import: later (small) downloads go straight in, without one.
+func TestOnlyTheFirstFolderHasATestSet(t *testing.T) {
 	fx := sliceFixture()
-	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
-		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"],
-	}}}
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{
+		"2026-10-14_030000": {"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"]},
+		"2026-10-14_060000": {"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"]},
+	}}
 	cfg := testConfig(t, newFake(t, f).URL)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	os.Remove(filepath.Join(cfg.test(), "products.csv"))
-	res, err := run(cfg, noPull, io.Discard)
-	if err != nil || !res.TestReady {
+	if res, err := run(cfg, noPull, io.Discard); err != nil || !res.TestReady {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if entries, _ := os.ReadDir(cfg.test()); len(entries) != 3 {
-		t.Fatalf("got %d files", len(entries))
+	f.ids = append(f.ids, "2026-10-14_060000")
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.TestReady || res.Folder == "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(res.Folder, testName)); err == nil || strings.Contains(summary(cfg, res), "small files") {
+		t.Fatal("no test set in a later folder")
 	}
 }
 
@@ -236,7 +240,9 @@ func TestSwapKeepsOldFolderWhenTheNewOneCannotMove(t *testing.T) {
 	}
 }
 
-func TestFirstClickInANewFolderGetsEverythingThenOnlyNew(t *testing.T) {
+// Through loadConfig, as the program runs: the download list lives next to the program, so deleting the data folder
+// after importing never brings old data back; the server's checkpoint does the same for a fresh unzip.
+func TestFirstClickGetsEverythingThenOnlyNew(t *testing.T) {
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
 	srv := newFake(t, f).URL
 	home := func() config {
@@ -253,21 +259,18 @@ func TestFirstClickInANewFolderGetsEverythingThenOnlyNew(t *testing.T) {
 	if err != nil || len(res.New) != 1 || !strings.Contains(summary(first, res), "first download") {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if res, err := run(first, noPull, io.Discard); err != nil || len(res.New) != 0 || len(res.Files) == 0 {
-		t.Fatalf("second click: %+v %v", res, err)
-	}
 	f.ids = append(f.ids, "2026-10-14_060000")
 	res, err = run(first, noPull, io.Discard)
 	if err != nil || len(res.New) != 1 || strings.Contains(summary(first, res), "first download") {
 		t.Fatalf("new data: %+v %v", res, err)
 	}
-	// same computer, a fresh unzip somewhere else: everything again
-	if res, err := run(home(), noPull, io.Discard); err != nil || len(res.New) != 2 || len(res.Files) == 0 {
+	// same office, a fresh unzip somewhere else: the server knows this office, nothing new
+	if res, err := run(home(), noPull, io.Discard); err != nil || len(res.New) != 0 || res.Folder != "" {
 		t.Fatalf("fresh folder: %+v %v", res, err)
 	}
 	// imported and deleted the data folder: old data stays away
 	os.RemoveAll(first.Folder)
-	if res, err := run(first, noPull, io.Discard); err != nil || len(res.New) != 0 || len(res.Files) != 0 {
+	if res, err := run(first, noPull, io.Discard); err != nil || len(res.New) != 0 || res.Folder != "" {
 		t.Fatalf("after deleting: %+v %v", res, err)
 	}
 }
@@ -279,15 +282,16 @@ func TestUTF8MarkerFromTheServerIsKept(t *testing.T) {
 		"products.csv": bom + fx["products.csv"], "contacts.csv": bom + fx["offline_contacts.csv"], "deals.csv": bom + fx["offline_deals.csv"],
 	}}}
 	cfg := testConfig(t, newFake(t, f).URL)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil {
 		t.Fatal(err)
 	}
-	for _, p := range []string{filepath.Join(cfg.production(), "offline_deals.csv"), filepath.Join(cfg.test(), "offline_deals.csv")} {
+	for _, p := range []string{filepath.Join(res.Folder, "offline_deals.csv"), filepath.Join(res.Folder, testName, "offline_deals.csv")} {
 		if got := read(t, p); !strings.HasPrefix(got, "ID,") { // read() fails without the marker, and strips it
 			t.Fatalf("%s: only one marker, then the header; starts %q", p, got[:6])
 		}
 	}
-	if s := sheetXML(t, filepath.Join(cfg.excel(), "offline_deals.xlsx")); strings.Contains(s, bom) {
+	if s := sheetXML(t, filepath.Join(res.Folder, excelName, "offline_deals.xlsx")); strings.Contains(s, bom) {
 		t.Fatal("the marker must not reach the Excel copy")
 	}
 }

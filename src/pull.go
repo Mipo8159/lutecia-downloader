@@ -73,6 +73,24 @@ func pull(client *http.Client, cfg config, opts options) error {
 	}
 }
 
+// putCheckpoint tells the server this computer has every bundle up to id. The server never moves a checkpoint back.
+func putCheckpoint(client *http.Client, cfg config, id string) error {
+	body, _ := json.Marshal(map[string]string{"bundle": id})
+	res, err := call(client, cfg, http.MethodPut, "/downloads/checkpoint", strings.NewReader(string(body)))
+	if err != nil {
+		return err
+	}
+	defer res.Body.Close()
+	if res.StatusCode != http.StatusOK {
+		var e struct {
+			Message any `json:"message"`
+		}
+		json.NewDecoder(res.Body).Decode(&e)
+		return fmt.Errorf("server answered %s: %v", res.Status, e.Message)
+	}
+	return nil
+}
+
 func fetchFile(client *http.Client, cfg config, id, name string, size int64, path string) error {
 	res, err := get(client, cfg, "/bundles/"+url.PathEscape(id)+"/files/"+url.PathEscape(name))
 	if err != nil {

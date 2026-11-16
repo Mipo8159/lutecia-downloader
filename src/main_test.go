@@ -28,6 +28,10 @@ type fake struct {
 	busy     bool   // a pull is already running: POST gets 409, then it ends after one poll
 	polls    int
 	posts    int
+	// The checkpoint of the one client the tests play (heartbeat keeps one per IP), as DownloadsController does.
+	checkpoint string
+	puts       []string // every PUT /downloads/checkpoint, in order
+	putFail    int      // fail this many PUTs with a 500
 }
 
 func newFake(t *testing.T, f *fake) *httptest.Server {
@@ -70,6 +74,45 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			f.pullTo = ""
 		}
 		io.WriteString(w, `{"status":"ok","note":"12 rows"}`)
+	case r.Method == "GET" && r.URL.Path == "/downloads":
+		list := []map[string]any{}
+		for _, id := range f.ids {
+			if f.checkpoint != "" && id <= f.checkpoint {
+				continue
+			}
+			var fs []map[string]any
+			for name, body := range f.files[id] {
+				fs = append(fs, map[string]any{"name": name, "size": len(body)})
+			}
+			list = append(list, map[string]any{"id": id, "files": fs})
+		}
+		body := map[string]any{"client": "203.0.113.1", "checkpoint": nil, "checkpointAt": nil, "firstDownload": f.checkpoint == "", "bundles": list}
+		if f.checkpoint != "" {
+			body["checkpoint"], body["checkpointAt"] = f.checkpoint, "2026-11-10T09:30:00"
+		}
+		json.NewEncoder(w).Encode(body)
+	case r.Method == "PUT" && r.URL.Path == "/downloads/checkpoint":
+		var b struct{ Bundle string }
+		json.NewDecoder(r.Body).Decode(&b)
+		f.puts = append(f.puts, b.Bundle)
+		if f.putFail > 0 {
+			f.putFail--
+			w.WriteHeader(500)
+			return
+		}
+		known := false
+		for _, id := range f.ids {
+			known = known || id == b.Bundle
+		}
+		if !known {
+			w.WriteHeader(400)
+			io.WriteString(w, `{"message":"no committed bundle"}`)
+			return
+		}
+		if b.Bundle > f.checkpoint {
+			f.checkpoint = b.Bundle
+		}
+		io.WriteString(w, `{}`)
 	case r.URL.Path == "/bundles":
 		list := []map[string]any{}
 		for _, id := range f.ids {
@@ -162,16 +205,27 @@ func TestFoldsEveryNewBundleIntoOneFilePerEntity(t *testing.T) {
 	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_030000", "2026-10-14_060000"}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if got := read(t, filepath.Join(cfg.production(), "products.csv")); got != productsHead+
+	if filepath.Dir(res.Folder) != cfg.Folder || !datedFolder.MatchString(filepath.Base(res.Folder)) ||
+		!strings.HasSuffix(res.Folder, " (everything)") {
+		t.Fatalf("the first download goes into a dated '(everything)' folder: %q", res.Folder)
+	}
+	if got := read(t, filepath.Join(res.Folder, "products.csv")); got != productsHead+
 		"IVF-P1,Lipstick,12.00\r\nIVF-P2,\"Perfume, 50ml\",99.00\r\nVST-P3,\"Gown\r\nlong\",5.00\r\n" { // CRLF file: CRLF inside quotes too
 		t.Fatalf("products: newer row must replace in place, new rows appended:\n%s", got)
 	}
-	if got := read(t, filepath.Join(cfg.production(), "offline_contacts.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
+	if got := read(t, filepath.Join(res.Folder, "offline_contacts.csv")); got != contactsHead+"ილია,555,Key: C-IVF-7091; Purchases: 2\r\n" {
 		t.Fatalf("contacts: same Key in Comment = same contact:\n%s", got)
 	}
-	entries, _ := os.ReadDir(cfg.production())
-	if len(entries) != 2 {
-		t.Fatalf("the folder must hold only the two import files, got %d entries", len(entries))
+	var names []string
+	entries, _ := os.ReadDir(res.Folder)
+	for _, e := range entries {
+		names = append(names, e.Name())
+	}
+	if !reflect.DeepEqual(names, []string{manifestName, "excel", "offline_contacts.csv", "products.csv"}) {
+		t.Fatalf("the folder must hold the two import files and their Excel copies: %v", names)
+	}
+	if f.checkpoint != "2026-10-14_060000" {
+		t.Fatalf("the server's checkpoint must move to the last bundle: %q", f.checkpoint)
 	}
 	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) {
 		t.Fatalf("import order and counts: %+v", res.Files)
@@ -206,14 +260,14 @@ func TestOnlineFilesMergeAndSortNextToOffline(t *testing.T) {
 	if !reflect.DeepEqual(res.Files, want) {
 		t.Fatalf("five files, import order, counts: %+v", res.Files)
 	}
-	if got := read(t, filepath.Join(cfg.production(), "online_contacts.csv")); got != onlineContactsHead+"Ana,599,P-1,2\r\n" {
+	if got := read(t, filepath.Join(res.Folder, "online_contacts.csv")); got != onlineContactsHead+"Ana,599,P-1,2\r\n" {
 		t.Fatalf("online contact: the newer row replaces the older one:\n%s", got)
 	}
-	if got := read(t, filepath.Join(cfg.production(), "online_deals.csv")); got != dealsHead+
+	if got := read(t, filepath.Join(res.Folder, "online_deals.csv")); got != dealsHead+
 		"1,WEB-21,WEB #21,P-1,Lipstick,10.00,1\r\n1,,,,Patch,5.00,1\r\n2,WEB-22,WEB #22 2026-11-03,P-1,Lipstick,10.00,1\r\n" {
 		t.Fatalf("online deals: appended and renumbered:\n%s", got)
 	}
-	off, on := read(t, filepath.Join(cfg.production(), "offline_deals.csv")), read(t, filepath.Join(cfg.production(), "online_deals.csv"))
+	off, on := read(t, filepath.Join(res.Folder, "offline_deals.csv")), read(t, filepath.Join(res.Folder, "online_deals.csv"))
 	if strings.SplitN(off, "\r\n", 2)[0] != strings.SplitN(on, "\r\n", 2)[0] {
 		t.Fatal("offline and online deals must keep the same header")
 	}
@@ -223,59 +277,185 @@ func TestOnlineFilesMergeAndSortNextToOffline(t *testing.T) {
 	}
 }
 
-func TestNotImportedYetMeansAddedToTheSameFiles(t *testing.T) {
+// The point of checkpoints: the second download goes into its own dated folder with only what is new, and the
+// first folder is left exactly as it was.
+func TestEachLaterDownloadGetsItsOwnFolderWithOnlyWhatIsNew(t *testing.T) {
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
 	cfg := testConfig(t, newFake(t, f).URL)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
-		t.Fatal(err)
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil || !first.FirstDownload {
+		t.Fatal(first, err)
 	}
+	before := read(t, filepath.Join(first.Folder, "products.csv"))
+
 	f.ids = append(f.ids, "2026-10-14_060000")
 	res, err := run(cfg, noPull, io.Discard)
-	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) {
+	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) || res.FirstDownload {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) {
-		t.Fatalf("second click without importing must keep the first click's rows: %+v", res.Files)
+	if res.Folder == first.Folder || strings.Contains(res.Folder, "everything") {
+		t.Fatalf("a new plain dated folder: %q", res.Folder)
+	}
+	if got := read(t, filepath.Join(res.Folder, "products.csv")); got != productsHead+"IVF-P1,Lipstick,12.00\r\nVST-P3,\"Gown\r\nlong\",5.00\r\n" {
+		t.Fatalf("only the second bundle's rows:\n%s", got)
+	}
+	if read(t, filepath.Join(first.Folder, "products.csv")) != before {
+		t.Fatal("the first folder must not change")
+	}
+	if !reflect.DeepEqual(res.Waiting, []string{filepath.Base(first.Folder), filepath.Base(res.Folder)}) {
+		t.Fatalf("both folders, oldest first (same minute too): %v", res.Waiting)
+	}
+	msg := summary(cfg, res)
+	for _, want := range []string{"only what is new or changed since the previous download (data up to 2026-10-14 03:00)",
+		"Import the older folders first", filepath.Base(first.Folder), "2 products"} {
+		if !strings.Contains(msg, want) {
+			t.Fatalf("summary lacks %q:\n%s", want, msg)
+		}
+	}
+	if !reflect.DeepEqual(f.puts, []string{"2026-10-14_030000", "2026-10-14_030000", "2026-10-14_060000"}) {
+		t.Fatalf("checkpoint after each folder (plus the start-up resend of the last one): %v", f.puts)
 	}
 }
 
-func TestImportedAndDeletedMeansNewFilesWithOnlyNewRows(t *testing.T) {
+func TestImportedAndDeletedMeansNothingComesBack(t *testing.T) {
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
 	cfg := testConfig(t, newFake(t, f).URL)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil {
 		t.Fatal(err)
 	}
-	os.Remove(filepath.Join(cfg.production(), "products.csv")) // the client imported both, then deleted them
-	os.Remove(filepath.Join(cfg.production(), "offline_contacts.csv"))
+	os.RemoveAll(first.Folder) // the client imported it, then deleted it
 
 	res, err := run(cfg, noPull, io.Discard)
-	if err != nil || len(res.New) != 0 || len(res.Files) != 0 {
-		t.Fatalf("nothing new: no files must come back: %+v %v", res, err)
+	if err != nil || len(res.New) != 0 || res.Folder != "" || len(res.Waiting) != 0 {
+		t.Fatalf("nothing new: no folder must come back: %+v %v", res, err)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "nothing new") {
+	if msg := summary(cfg, res); !strings.Contains(msg, "up to date") || strings.Contains(msg, "still there") {
 		t.Fatal(msg)
 	}
+	if entries, _ := os.ReadDir(cfg.Folder); len(entries) != 0 {
+		t.Fatalf("no empty folder for a download without data: %d entries", len(entries))
+	}
+}
 
-	f.ids = append(f.ids, "2026-10-14_060000")
-	res, err = run(cfg, noPull, io.Discard)
-	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 2}, {"offline_contacts.csv", 1}}) {
+func TestNothingNewButFoldersStillThere(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	first, _ := run(cfg, noPull, io.Discard)
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || len(res.New) != 0 || res.Folder != "" || !reflect.DeepEqual(res.Waiting, []string{filepath.Base(first.Folder)}) {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "products.csv, then offline_contacts.csv") || !strings.Contains(msg, "2 products") {
+	if msg := summary(cfg, res); !strings.Contains(msg, "still there") || !strings.Contains(msg, filepath.Base(first.Folder)) {
 		t.Fatal(msg)
 	}
 }
 
-func TestNothingNewButFilesStillThere(t *testing.T) {
-	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+// Same office (the server knows its IP), a fresh unzip: only what is new since that office's last download.
+func TestServerCheckpointMeansAFreshCopyGetsOnlyWhatIsNew(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000", "2026-10-14_060000"}, files: twoBundles(), checkpoint: "2026-10-14_030000"}
 	cfg := testConfig(t, newFake(t, f).URL)
-	run(cfg, noPull, io.Discard)
 	res, err := run(cfg, noPull, io.Discard)
-	if err != nil || len(res.New) != 0 || len(res.Files) != 2 {
+	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) || res.FirstDownload || strings.Contains(res.Folder, "everything") {
 		t.Fatalf("%+v %v", res, err)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "No new data since last time") {
-		t.Fatal(msg)
+	if res.Since != "2026-10-14 03:00" || strings.Contains(summary(cfg, res), "first download") {
+		t.Fatalf("%+v\n%s", res, summary(cfg, res))
+	}
+}
+
+// A copy that downloaded before checkpoints existed: its list says what its production folder holds. That is its
+// baseline: the server learns it first, and only newer data comes, into a dated folder; production is left alone.
+func TestCopyFromBeforeCheckpointsKeepsItsBaseline(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000", "2026-10-14_060000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	writeFiles(t, cfg.production(), map[string]string{"products.csv": "old data"})
+	appendState(cfg.State, "2026-10-14_030000")
+
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || !reflect.DeepEqual(res.New, []string{"2026-10-14_060000"}) || res.FirstDownload {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if !reflect.DeepEqual(f.puts, []string{"2026-10-14_030000", "2026-10-14_060000"}) || f.checkpoint != "2026-10-14_060000" {
+		t.Fatalf("baseline first, then the new folder: %v %q", f.puts, f.checkpoint)
+	}
+	if readRaw(t, filepath.Join(cfg.production(), "products.csv")) != "old data" {
+		t.Fatal("production must be left alone")
+	}
+	if !reflect.DeepEqual(res.Waiting, []string{"production", filepath.Base(res.Folder)}) ||
+		!strings.Contains(summary(cfg, res), "   production\n") {
+		t.Fatalf("an unimported production folder comes first: %v\n%s", res.Waiting, summary(cfg, res))
+	}
+}
+
+// The folder was made but the server never heard of it (connection lost at the very end): the next run tells the
+// server, and the same data does not come a second time.
+func TestLostCheckpointIsSentAgainNotDownloadedAgain(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles(), putFail: 1}
+	cfg := testConfig(t, newFake(t, f).URL)
+	var out strings.Builder
+	first, err := run(cfg, noPull, &out)
+	if err != nil || first.Folder == "" || f.checkpoint != "" || !strings.Contains(out.String(), "next run tells it again") {
+		t.Fatalf("%+v %v %q", first, err, out.String())
+	}
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder != "" || len(res.New) != 0 || f.checkpoint != "2026-10-14_030000" {
+		t.Fatalf("%+v %v %q", res, err, f.checkpoint)
+	}
+}
+
+// Two windows at once (a double double-click) would put the same data into two folders: the second is turned away.
+func TestSecondWindowIsTurnedAway(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles()}
+	cfg := testConfig(t, newFake(t, f).URL)
+	writeFiles(t, cfg.Folder, map[string]string{lockName: "123 now"})
+	if _, err := run(cfg, fastPull, io.Discard); err == nil || !strings.Contains(err.Error(), "already running") {
+		t.Fatalf("want already running, got %v", err)
+	}
+	if f.posts != 0 || len(f.puts) != 0 {
+		t.Fatal("the second window must not touch the server")
+	}
+	if names, _ := datedFolders(cfg.Folder); len(names) != 0 {
+		t.Fatal(names)
+	}
+	// a lock left by a computer switched off mid-run is taken over
+	old := time.Now().Add(-3 * time.Hour)
+	os.Chtimes(filepath.Join(cfg.Folder, lockName), old, old)
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder == "" {
+		t.Fatalf("%+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(cfg.Folder, lockName)); err == nil {
+		t.Fatal("the lock must be gone after the run")
+	}
+}
+
+// The program stopped right after making the folder: neither its list nor the server heard of it. The folder's own
+// list keeps the same data from coming a second time.
+func TestFolderMadeButNotListedDoesNotComeAgain(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles(), putFail: 1}
+	cfg := testConfig(t, newFake(t, f).URL)
+	first, err := run(cfg, noPull, io.Discard)
+	if err != nil || first.Folder == "" {
+		t.Fatal(first, err)
+	}
+	os.Remove(cfg.State)
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder != "" || f.checkpoint != "2026-10-14_030000" {
+		t.Fatalf("%+v %v %q", res, err, f.checkpoint)
+	}
+}
+
+func TestDatedFoldersSortByTime(t *testing.T) {
+	dir := t.TempDir()
+	for _, n := range []string{"2026-11-17 09-00", "2026-11-16 14-05 (2)", "2026-11-16 14-05", "2026-11-16 14-05 (everything)",
+		"2026-11-16 14-05 (10)", "production", "excel", ".2026-11-17 10-00.partial-123", "2026-11-16 notes"} {
+		os.MkdirAll(filepath.Join(dir, n), 0o755)
+	}
+	got, err := datedFolders(dir)
+	want := []string{"2026-11-16 14-05 (everything)", "2026-11-16 14-05", "2026-11-16 14-05 (2)", "2026-11-16 14-05 (10)", "2026-11-17 09-00"}
+	if err != nil || !reflect.DeepEqual(got, want) {
+		t.Fatalf("%v %v", got, err)
 	}
 }
 
@@ -316,6 +496,9 @@ func TestCutDownloadChangesNothingAndRetries(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(cfg.Folder); len(entries) != 0 {
 		t.Fatalf("a cut download must leave no files (not even products.csv), got %d", len(entries))
+	}
+	if f.checkpoint != "" || len(f.puts) != 0 {
+		t.Fatalf("a cut download must not move the server's checkpoint: %q %v", f.checkpoint, f.puts)
 	}
 	f.short = ""
 	if res, err := run(cfg, noPull, io.Discard); err != nil || len(res.New) != 1 {

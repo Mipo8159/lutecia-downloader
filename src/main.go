@@ -1,14 +1,16 @@
 // Lutecia downloader (Windows, macOS, Linux): double-click it, and it
 //  1. asks the heartbeat server to pull the latest data from APEX now, and waits for it (with a ticking timer);
-//  2. downloads every bundle it has not downloaded before, oldest first, and merges each one into ONE file per
-//     entity in "Lutecia for Bitrix/production" next to it, and copies a small linked part into ".../test";
-//  3. says how many rows are ready and opens that folder.
+//  2. asks the server what this computer still needs (GET /downloads: the server keeps a checkpoint per client IP,
+//     the last bundle that client finished): the first time everything, after that only what is new since then;
+//  3. merges those bundles into ONE file per entity in a NEW dated folder, "Lutecia for Bitrix/<date time>" next to
+//     it (the first one is "<date time> (everything)"), with Excel copies (and, in the first one, a small test set);
+//  4. only then moves the server's checkpoint forward (PUT /downloads/checkpoint), says how many rows are ready and
+//     opens the folder.
 //
-// Bundles are deltas. The files hold everything downloaded and not imported yet: the client imports them, then
-// deletes them, and the next click starts new ones. A newer row replaces the row with the same key, so forgetting
-// to delete only re-imports some rows, never loses one. What was downloaded is remembered next to the program
-// (one list per server), so deleting the files or their folder never brings old data back, and a fresh unzip starts
-// from everything the server holds.
+// The client imports each dated folder once, oldest first, then deletes it. The bundles of each download are also
+// listed next to the program (one list per server): on start the newest one is sent to the server as this computer's
+// checkpoint. So a checkpoint lost on the way, a changed office IP, or a copy that downloaded before checkpoints
+// existed (its "production" folder is its baseline) never gets old data again.
 //
 // Settings: LUTECIA_SERVER and LUTECIA_TOKEN in .env next to the program (environment variables win). The client
 // never has to find that (hidden) file: when it is missing, incomplete or its token is refused, the program makes
@@ -39,9 +41,14 @@ import (
 
 const (
 	folderName     = "Lutecia for Bitrix"
-	productionName = "production"
+	productionName = "production" // before checkpoints: one folder all downloads were merged into
 	testName       = "test"
 	excelName      = "excel"
+	stampLayout    = "2006-01-02 15-04"     // a dated folder's name: no ':' (Windows), and name order is time order
+	everything     = " (everything)"        // the first download's folder
+	manifestName   = ".lutecia-bundles.txt" // in a dated folder: the bundles it holds
+	lockName       = ".lutecia-running"     // in "Lutecia for Bitrix" while a download runs
+	staleLock      = 2 * time.Hour          // longer than any run (the pull wait stops at 30 minutes)
 )
 
 //go:embed env.example
@@ -54,7 +61,9 @@ func (e settingsError) Error() string { return e.msg }
 
 var (
 	bundleID = regexp.MustCompile(`^\d{4}-\d{2}-\d{2}_\d{6}$`)
-	fileName = regexp.MustCompile(`^[A-Za-z0-9_]+\.(csv|json|txt)$`)
+	// The folders this program makes, one per download: "2026-11-16 14-05", "... (everything)", "... (2)".
+	datedFolder = regexp.MustCompile(`^\d{4}-\d{2}-\d{2} \d{2}-\d{2}( \(everything\))?( \(\d+\))?$`)
+	fileName    = regexp.MustCompile(`^[A-Za-z0-9_]+\.(csv|json|txt)$`)
 	// Bitrix needs this order: deals and contacts refer to products and companies by name, deals to contacts.
 	// online_*: the web shop's customers and orders; online_deals has exactly the columns of offline_deals.
 	importOrder = []string{"products.csv", "companies.csv", "offline_contacts.csv", "online_contacts.csv",
@@ -68,8 +77,17 @@ var (
 type config struct {
 	Server string // http(s)://host:port
 	Token  string
-	Folder string // "Lutecia for Bitrix": holds the production and test folders
+	Folder string // "Lutecia for Bitrix": holds one dated folder per download
 	State  string // the list of downloaded bundle ids
+}
+
+// pending is the server's answer to GET /downloads.
+type pending struct {
+	Client        string   `json:"client"`
+	Checkpoint    *string  `json:"checkpoint"`
+	CheckpointAt  *string  `json:"checkpointAt"`
+	FirstDownload bool     `json:"firstDownload"`
+	Bundles       []bundle `json:"bundles"`
 }
 
 type bundle struct {
@@ -88,15 +106,16 @@ type fileRows struct {
 
 type result struct {
 	New           []string   // bundles downloaded this time, oldest first
-	Files         []fileRows // what the folder holds now, in import order
-	FirstDownload bool       // nothing was downloaded in this folder before
-	TestReady     bool       // the test folder was made from these files just now
-	ExcelReady    bool       // the excel folder holds a copy of each of these files
+	Folder        string     // the dated folder made this time ("" = nothing new)
+	Files         []fileRows // what that folder holds, in import order
+	FirstDownload bool       // the server had nothing for this computer: the folder holds everything
+	Since         string     // the data this computer had before, "2026-11-03 16:56" (from the server's checkpoint)
+	Waiting       []string   // every folder still there to import, oldest first ("production" from older copies first)
+	TestReady     bool       // the test folder in it was made
+	ExcelReady    bool       // the excel folder in it holds a copy of each file
 }
 
 func (c config) production() string { return filepath.Join(c.Folder, productionName) }
-func (c config) test() string       { return filepath.Join(c.Folder, testName) }
-func (c config) excel() string      { return filepath.Join(c.Folder, excelName) }
 
 func main() {
 	home := flag.String("home", "", "folder with .env and the output (default: this program's folder)")
@@ -123,10 +142,14 @@ func main() {
 	}
 
 	// A double-clicked window closes with the program: wait, so the message can be read.
-	if err == nil && len(res.Files) > 0 {
+	if err == nil && (res.Folder != "" || len(res.Waiting) > 0) {
 		fmt.Print("\nPress Enter to open the folder.")
 		bufio.NewReader(os.Stdin).ReadString('\n')
-		openFolder(cfg.Folder)
+		if res.Folder != "" {
+			openFolder(res.Folder)
+		} else {
+			openFolder(cfg.Folder)
+		}
 	} else {
 		fmt.Print("\nPress Enter to close.")
 		bufio.NewReader(os.Stdin).ReadString('\n')
@@ -138,19 +161,23 @@ func main() {
 
 // summary is the closing message, for people who don't know what a bundle or CSV is.
 func summary(cfg config, res result) string {
-	if len(res.Files) == 0 {
-		return "Everything is up to date: there is nothing new to import into Bitrix24."
-	}
 	var b strings.Builder
-	if len(res.New) > 0 {
-		fmt.Fprintf(&b, "DONE! The new data is ready in the folder\n  %s\n\n", cfg.production())
-	} else {
-		fmt.Fprintf(&b, "No new data since last time. The files from last time are still in the folder\n  %s\n"+
-			"If they are not imported into Bitrix24 yet, import them now.\n\n", cfg.production())
+	if res.Folder == "" {
+		b.WriteString("Everything is up to date: there is nothing new since the last download.")
+		if len(res.Waiting) > 0 {
+			fmt.Fprintf(&b, "\n\nThese folders in\n  %s\nare still there. If they are not imported into Bitrix24 yet, import them now, oldest first:\n", cfg.Folder)
+			for _, w := range res.Waiting {
+				fmt.Fprintf(&b, "   %s\n", w)
+			}
+		}
+		return strings.TrimRight(b.String(), "\n")
 	}
-	if res.FirstDownload && len(res.New) > 0 {
-		b.WriteString("This is the first download in this folder, so it holds everything. If these deals are already in\n" +
+	fmt.Fprintf(&b, "DONE! The new data is ready in the folder\n  %s\n\n", res.Folder)
+	if res.FirstDownload {
+		b.WriteString("This is the first download on this computer, so it holds everything. If these deals are already in\n" +
 			"Bitrix24, do not import offline_deals.csv or online_deals.csv again: they would be there twice.\n\n")
+	} else if res.Since != "" {
+		fmt.Fprintf(&b, "It holds only what is new or changed since the previous download (data up to %s).\n\n", res.Since)
 	}
 	names := make([]string, len(res.Files))
 	for i, f := range res.Files {
@@ -164,16 +191,22 @@ func summary(cfg config, res result) string {
 	fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
 	b.WriteString("In the Bitrix24 import choose: encoding UTF-8, separator comma.\n" +
 		"Do not open these files in Excel and never save them from Excel: that breaks Georgian letters and phone numbers.\n")
-	b.WriteString("When everything is imported, delete these files. The next time, new files are made.")
+	b.WriteString("When everything is imported, delete this folder. The next download makes a new one with only what is new.")
+	if older := slices.DeleteFunc(slices.Clone(res.Waiting), func(w string) bool { return w == filepath.Base(res.Folder) }); len(older) > 0 {
+		b.WriteString("\n\nImport the older folders first if they are not imported yet (oldest first):\n")
+		for _, w := range older {
+			fmt.Fprintf(&b, "   %s\n", w)
+		}
+		b.WriteString("Delete each folder once it is imported.")
+	}
 	if res.ExcelReady {
 		fmt.Fprintf(&b, "\n\nTo look at the data, double-click the files in\n  %s\n"+
-			"Those are only for looking: always import the files from production into Bitrix24.\n"+
-			"Delete them together with the production files: they hold customer data.", cfg.excel())
+			"Those are only for looking: always import the .csv files into Bitrix24.", filepath.Join(res.Folder, excelName))
 	}
 	if res.TestReady {
 		fmt.Fprintf(&b, "\n\nTo try an import first, use the small files in\n  %s\n"+
-			"The test deals have names starting with TEST: delete the test deals in Bitrix24 before importing production,\n"+
-			"or those deals are there twice. When you finish testing, delete that folder too: it holds customer data.", cfg.test())
+			"The test deals have names starting with TEST: delete the test deals in Bitrix24 before importing the real files,\n"+
+			"or those deals are there twice. When you finish testing, delete that folder too: it holds customer data.", filepath.Join(res.Folder, testName))
 	}
 	return b.String()
 }
@@ -184,10 +217,16 @@ type options struct {
 	PullTimeout time.Duration // stop waiting (the pull goes on; its data comes with the next click)
 }
 
-// run optionally pulls fresh data, then merges every bundle not downloaded before into the folder's files.
+// run optionally pulls fresh data, then puts every bundle this computer has not had yet into one new dated folder.
 func run(cfg config, opts options, out io.Writer) (result, error) {
-	// First, before anything that can fail: customer data must not outlive the production files.
-	if stuck := cleanExcel(cfg.production(), cfg.excel()); len(stuck) > 0 {
+	// One window at a time: two at once would put the same data into two folders, imported twice.
+	unlock, err := lock(cfg.Folder)
+	if err != nil {
+		return result{}, err
+	}
+	defer unlock()
+	// First, before anything that can fail: customer data must not outlive the files it was copied from.
+	if stuck := cleanAllExcel(cfg); len(stuck) > 0 {
 		fmt.Fprintf(out, "Please close %s in Excel and delete it: the data is no longer needed there.\n", strings.Join(stuck, ", "))
 	}
 	client := &http.Client{Transport: &http.Transport{
@@ -209,59 +248,131 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		}
 	}
 
-	var list []bundle
-	if err := getJSON(client, cfg, "/bundles", &list); err != nil {
-		return result{}, err
-	}
 	done, err := readState(cfg.State)
 	if err != nil {
 		return result{}, err
 	}
-	var res result
-	res.FirstDownload = len(done) == 0
-	for _, b := range list {
-		if done[b.ID] {
-			continue
+	// A folder made but not yet on the list (the program stopped right after making it) still counts as downloaded.
+	if err := readManifests(cfg.Folder, done); err != nil {
+		return result{}, err
+	}
+	// Tell the server what this computer already has (a checkpoint lost on the way, a new office IP, a copy from
+	// before checkpoints). The server keeps the later of the two, so this never brings old data back.
+	if latest := newest(done); latest != "" {
+		if err := putCheckpoint(client, cfg, latest); err != nil {
+			var fatal fatalError
+			if errors.As(err, &fatal) {
+				return result{}, err
+			}
+			fmt.Fprintf(out, "Note: the server did not take this computer's last download (%v).\n", err)
 		}
+	}
+	var p pending
+	if err := getJSON(client, cfg, "/downloads", &p); err != nil {
+		return result{}, err
+	}
+	var todo []bundle
+	for _, b := range p.Bundles {
 		if !bundleID.MatchString(b.ID) {
 			return result{}, fmt.Errorf("the server sent an unexpected data name %q", b.ID)
 		}
-		if len(res.New) == 0 {
-			fmt.Fprintln(out, "Downloading the new data ...")
+		if !done[b.ID] {
+			todo = append(todo, b)
 		}
-		if err := merge(client, cfg, b); err != nil {
-			return result{}, err
-		}
-		if err := appendState(cfg.State, b.ID); err != nil {
-			return result{}, err
-		}
-		res.New = append(res.New, b.ID)
 	}
-	res.Files, err = countFiles(cfg.production())
-	if err != nil {
+	res := result{FirstDownload: p.FirstDownload && len(done) == 0}
+	if p.Checkpoint != nil && bundleID.MatchString(*p.Checkpoint) {
+		c := *p.Checkpoint // 2026-11-03_165626 -> 2026-11-03 16:56
+		res.Since = c[:10] + " " + c[11:13] + ":" + c[13:15]
+	}
+	if len(todo) > 0 {
+		fmt.Fprintln(out, "Downloading the new data ...")
+		if res, err = download(client, cfg, todo, res, out); err != nil {
+			return result{}, err
+		}
+	}
+	if res.Waiting, err = datedFolders(cfg.Folder); err != nil {
 		return res, err
 	}
-	if stuck := cleanExcel(cfg.production(), cfg.excel()); len(stuck) > 0 && len(res.New) > 0 {
-		fmt.Fprintf(out, "Please close %s in Excel and delete it.\n", strings.Join(stuck, ", "))
-	}
-	if res.ExcelReady, err = syncExcel(cfg.production(), cfg.excel(), res.Files); err != nil {
-		res.ExcelReady = false
-		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The production files are fine.\n", err)
-	}
-	if len(res.Files) > 0 {
-		res.TestReady, err = writeTestSlice(cfg.production(), cfg.test())
-		if err != nil {
-			res.TestReady = false
-			fmt.Fprintf(out, "The small test files could not be made (%v). The production files are fine.\n", err)
-		}
+	// A copy from before checkpoints merged everything into "production": that comes before every dated folder.
+	if files, _ := countFiles(cfg.production()); len(files) > 0 {
+		res.Waiting = append([]string{productionName}, res.Waiting...)
 	}
 	return res, nil
 }
 
+// download builds the dated folder under a hidden name and shows it only when it is complete: a cut connection
+// leaves no folder that looks importable. Then it records the bundles here and moves the server's checkpoint.
+func download(client *http.Client, cfg config, todo []bundle, res result, out io.Writer) (result, error) {
+	if err := os.MkdirAll(cfg.Folder, 0o755); err != nil {
+		return res, err
+	}
+	removeLeftovers(cfg.Folder)
+	name := time.Now().Format(stampLayout)
+	if res.FirstDownload {
+		name += everything
+	}
+	tmp, err := os.MkdirTemp(cfg.Folder, "."+name+".partial-")
+	if err != nil {
+		return res, err
+	}
+	defer os.RemoveAll(tmp) // gone once renamed; otherwise the half-made folder
+	for _, b := range todo {
+		if err := merge(client, cfg, b, tmp); err != nil {
+			return res, err
+		}
+	}
+	if res.Files, err = countFiles(tmp); err != nil {
+		return res, err
+	}
+	if res.ExcelReady, err = makeExcel(tmp, filepath.Join(tmp, excelName), res.Files); err != nil {
+		res.ExcelReady = false
+		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The import files are fine.\n", err)
+	}
+	if res.FirstDownload {
+		if res.TestReady, err = writeTestSlice(tmp, filepath.Join(tmp, testName)); err != nil {
+			res.TestReady = false
+			fmt.Fprintf(out, "The small test files could not be made (%v). The import files are fine.\n", err)
+		}
+	}
+	ids := make([]string, len(todo))
+	for i, b := range todo {
+		ids[i] = b.ID
+	}
+	// The folder says what it holds, so the rename below is the one moment it counts as downloaded.
+	if err := os.WriteFile(filepath.Join(tmp, manifestName), []byte(strings.Join(ids, "\r\n")+"\r\n"), 0o644); err != nil {
+		return res, err
+	}
+	dst := filepath.Join(cfg.Folder, name)
+	for i := 2; exists(dst); i++ { // two downloads in one minute
+		dst = filepath.Join(cfg.Folder, fmt.Sprintf("%s (%d)", name, i))
+	}
+	// Windows: an antivirus or the search indexer may still hold a just-written file for a moment.
+	err = os.Rename(tmp, dst)
+	for i := 0; err != nil && i < 5; i++ {
+		time.Sleep(time.Second)
+		err = os.Rename(tmp, dst)
+	}
+	if err != nil {
+		return res, fmt.Errorf("the new folder could not be put in place (%v). Nothing was lost: just run this again", err)
+	}
+	res.Folder, res.New = dst, ids
+	if err := appendState(cfg.State, ids...); err != nil {
+		return res, err // the folder's own list keeps it from coming again
+	}
+	// The folder is safe here and in the list above; if this fails, the next start sends it again.
+	if err := putCheckpoint(client, cfg, slices.Max(ids)); err != nil {
+		fmt.Fprintf(out, "Note: the server could not record this download yet (%v); the next run tells it again.\n", err)
+	}
+	return res, nil
+}
+
+// makeExcel is syncExcel; a test swaps it to see that a failed copy harms nothing.
+var makeExcel = syncExcel
+
 // merge downloads one bundle's CSV files into a temporary folder, checks each is complete, and only then merges
-// them into the import files. A cut connection changes nothing; merging the same bundle twice changes nothing
-// either, so a run stopped between merging and appendState is simply repeated by the next click.
-func merge(client *http.Client, cfg config, b bundle) error {
+// them into the files in dst (a newer row replaces the row with the same key).
+func merge(client *http.Client, cfg config, b bundle, dst string) error {
 	tmp, err := os.MkdirTemp("", "lutecia-")
 	if err != nil {
 		return err
@@ -280,19 +391,125 @@ func merge(client *http.Client, cfg config, b bundle) error {
 		}
 		got = append(got, f.Name)
 	}
-	if err := os.MkdirAll(cfg.production(), 0o755); err != nil {
-		return err
-	}
 	for _, name := range got {
 		local := name
 		if l, ok := localNames[name]; ok {
 			local = l
 		}
-		if err := mergeCSV(filepath.Join(cfg.production(), local), filepath.Join(tmp, name)); err != nil {
+		if err := mergeCSV(filepath.Join(dst, local), filepath.Join(tmp, name)); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// datedFolders lists the download folders still in the folder, oldest first (their names sort by time).
+func datedFolders(folder string) ([]string, error) {
+	entries, err := os.ReadDir(folder)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var names []string
+	for _, e := range entries {
+		if e.IsDir() && datedFolder.MatchString(e.Name()) {
+			names = append(names, e.Name())
+		}
+	}
+	slices.SortFunc(names, func(a, b string) int { return strings.Compare(folderOrder(a), folderOrder(b)) })
+	return names, nil
+}
+
+// folderOrder sorts dated folders by time; within one minute "(everything)" first, then the plain name, then (2), (3) ...
+func folderOrder(name string) string {
+	stamp, rest := name[:len(stampLayout)], name[len(stampLayout):]
+	n := 1
+	if strings.HasPrefix(rest, everything) {
+		n, rest = 0, strings.TrimPrefix(rest, everything)
+	}
+	if rest != "" {
+		fmt.Sscanf(rest, " (%d)", &n)
+	}
+	return fmt.Sprintf("%s %06d", stamp, n)
+}
+
+// cleanAllExcel: in every dated folder (and the old production folder), remove the Excel copy of a deleted file.
+func cleanAllExcel(cfg config) (stuck []string) {
+	stuck = cleanExcel(cfg.production(), filepath.Join(cfg.Folder, excelName))
+	names, _ := datedFolders(cfg.Folder)
+	for _, n := range names {
+		stuck = append(stuck, cleanExcel(filepath.Join(cfg.Folder, n), filepath.Join(cfg.Folder, n, excelName))...)
+	}
+	return stuck
+}
+
+// removeLeftovers deletes half-made folders of a download that was cut off over an hour ago (a younger one may
+// belong to another Lutecia window).
+func removeLeftovers(folder string) {
+	paths, _ := filepath.Glob(filepath.Join(folder, ".* *.partial-*"))
+	for _, p := range paths {
+		if fi, err := os.Lstat(p); err == nil && fi.IsDir() && time.Since(fi.ModTime()) > time.Hour {
+			os.RemoveAll(p)
+		}
+	}
+}
+
+// readManifests adds the bundles listed in each dated folder to done.
+func readManifests(folder string, done map[string]bool) error {
+	names, err := datedFolders(folder)
+	for _, n := range names {
+		data, err := os.ReadFile(filepath.Join(folder, n, manifestName))
+		if err != nil {
+			continue // older folder or none
+		}
+		for _, line := range strings.Split(string(data), "\n") {
+			if id := strings.TrimSpace(line); bundleID.MatchString(id) {
+				done[id] = true
+			}
+		}
+	}
+	return err
+}
+
+// lock makes the lock file, or says another window is still at work. A lock older than staleLock is left over from
+// a computer that was switched off mid-run, and is taken over.
+func lock(folder string) (unlock func(), err error) {
+	if err := os.MkdirAll(folder, 0o755); err != nil {
+		return nil, err
+	}
+	path := filepath.Join(folder, lockName)
+	for try := 0; try < 2; try++ {
+		f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o644)
+		if err == nil {
+			fmt.Fprintf(f, "%d %s\r\n", os.Getpid(), time.Now().Format(time.RFC3339))
+			f.Close()
+			return func() { os.Remove(path) }, nil
+		}
+		fi, serr := os.Stat(path)
+		if serr != nil || time.Since(fi.ModTime()) < staleLock {
+			break
+		}
+		os.Remove(path)
+	}
+	return nil, errors.New("Lutecia is already running in another window. Wait for it to finish, then close this one")
+}
+
+// newest is the latest bundle id in the list (ids sort by time).
+func newest(done map[string]bool) string {
+	latest := ""
+	for id := range done {
+		if bundleID.MatchString(id) && id > latest {
+			latest = id
+		}
+	}
+	return latest
+}
+
+func exists(path string) bool {
+	_, err := os.Lstat(path)
+	return err == nil
 }
 
 // countFiles lists the import files in the folder, in import order, with their row counts.
@@ -398,8 +615,8 @@ func loadConfig(dir string) (config, error) {
 		return cfg, settingsError{err.Error()}
 	}
 	sum := sha256.Sum256([]byte(cfg.Server)) // one list per server: a test server's bundles never hide production's
-	// Next to the program, not in the data folder: a fresh unzip downloads everything, and deleting imported files
-	// never brings old data back.
+	// Next to the program, not in the data folder: deleting imported folders never brings old data back, and on start
+	// its newest id is sent to the server (the server's checkpoint per office IP covers a fresh unzip).
 	cfg.State = filepath.Join(dir, ".lutecia-downloaded-"+hex.EncodeToString(sum[:6])+".txt")
 	return cfg, nil
 }
@@ -434,7 +651,7 @@ func readState(path string) (map[string]bool, error) {
 	return done, err
 }
 
-func appendState(path, id string) error {
+func appendState(path string, ids ...string) error {
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
 		return err
 	}
@@ -442,7 +659,7 @@ func appendState(path, id string) error {
 	if err != nil {
 		return err
 	}
-	if _, err = f.WriteString(id + "\r\n"); err == nil {
+	if _, err = f.WriteString(strings.Join(ids, "\r\n") + "\r\n"); err == nil {
 		err = f.Sync()
 	}
 	if cerr := f.Close(); err == nil {

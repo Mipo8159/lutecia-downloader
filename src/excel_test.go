@@ -3,6 +3,7 @@ package main
 import (
 	"archive/zip"
 	"encoding/xml"
+	"errors"
 	"io"
 	"os"
 	"path/filepath"
@@ -85,7 +86,7 @@ func TestColumnLetters(t *testing.T) {
 	}
 }
 
-func TestExcelFolderFollowsProduction(t *testing.T) {
+func TestExcelFolderFollowsTheImportFiles(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {
 		"products.csv": fx["products.csv"], "contacts.csv": fx["offline_contacts.csv"], "deals.csv": fx["offline_deals.csv"],
@@ -95,8 +96,9 @@ func TestExcelFolderFollowsProduction(t *testing.T) {
 	if err != nil || !res.ExcelReady {
 		t.Fatalf("%+v %v", res, err)
 	}
+	excel := filepath.Join(res.Folder, excelName)
 	names := func() (out []string) {
-		entries, _ := os.ReadDir(cfg.excel())
+		entries, _ := os.ReadDir(excel)
 		for _, e := range entries {
 			out = append(out, e.Name())
 		}
@@ -105,36 +107,16 @@ func TestExcelFolderFollowsProduction(t *testing.T) {
 	if got := strings.Join(names(), " "); got != "offline_contacts.xlsx offline_deals.xlsx products.xlsx" {
 		t.Fatal(got)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, cfg.excel()) {
+	if msg := summary(cfg, res); !strings.Contains(msg, excel) {
 		t.Fatal(msg)
 	}
 
-	// an unchanged file is not rewritten, a changed one is
-	copyPath, csvPath := filepath.Join(cfg.excel(), "products.xlsx"), filepath.Join(cfg.production(), "products.csv")
-	before, _ := os.Stat(copyPath)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if after, _ := os.Stat(copyPath); !after.ModTime().Equal(before.ModTime()) {
-		t.Fatal("an unchanged file must not be rewritten")
-	}
-	os.WriteFile(csvPath, []byte(sliceProducts+"N,Changed,1\r\n"), 0o644)
-	future := time.Now().Add(time.Hour)
-	os.Chtimes(csvPath, future, future)
-	if _, err := run(cfg, noPull, io.Discard); err != nil {
-		t.Fatal(err)
-	}
-	if !strings.Contains(sheetXML(t, copyPath), "Changed") {
-		t.Fatal("a changed file must be copied again")
-	}
-
-	// the client imported and deleted production: customer data does not stay behind
+	// the client imported and deleted the import files but kept the folder: customer data does not stay behind
 	for _, n := range []string{"products.csv", "offline_contacts.csv", "offline_deals.csv"} {
-		os.Remove(filepath.Join(cfg.production(), n))
+		os.Remove(filepath.Join(res.Folder, n))
 	}
-	res, err = run(cfg, noPull, io.Discard)
-	if err != nil || res.ExcelReady || len(names()) != 0 {
-		t.Fatalf("%+v %v %v", res, err, names())
+	if _, err = run(cfg, noPull, io.Discard); err != nil || len(names()) != 0 {
+		t.Fatalf("%v %v", err, names())
 	}
 }
 
@@ -142,15 +124,15 @@ func TestFailedExcelCopyHarmsNothing(t *testing.T) {
 	fx := sliceFixture()
 	f := &fake{ids: []string{"2026-10-14_030000"}, files: map[string]map[string]string{"2026-10-14_030000": {"products.csv": fx["products.csv"]}}}
 	cfg := testConfig(t, newFake(t, f).URL)
-	os.MkdirAll(cfg.Folder, 0o755)
-	os.WriteFile(cfg.excel(), []byte("a file where the folder should go"), 0o644)
+	makeExcel = func(string, string, []fileRows) (bool, error) { return false, errors.New("products.xlsx is open") }
+	t.Cleanup(func() { makeExcel = syncExcel })
 	var out strings.Builder
 	res, err := run(cfg, noPull, &out)
 	if err != nil || res.ExcelReady || !strings.Contains(out.String(), "Excel copies could be made") {
 		t.Fatalf("%+v %v %q", res, err, out.String())
 	}
-	if read(t, filepath.Join(cfg.production(), "products.csv")) != fx["products.csv"] {
-		t.Fatal("production must be intact")
+	if read(t, filepath.Join(res.Folder, "products.csv")) != fx["products.csv"] {
+		t.Fatal("the import files must be intact")
 	}
 	if done, _ := readState(cfg.State); !done["2026-10-14_030000"] {
 		t.Fatal("the bundle must stay on the downloaded list")
@@ -223,12 +205,17 @@ func TestCleanupTouchesOnlyTheProgramsOwnCopies(t *testing.T) {
 
 func TestCopiesGoEvenWhenTheServerCannotBeReached(t *testing.T) {
 	cfg := testConfig(t, "http://127.0.0.1:1")
-	writeFiles(t, cfg.excel(), map[string]string{"products.xlsx": "customer data"})
+	old := filepath.Join(cfg.Folder, excelName)                       // from before checkpoints
+	dated := filepath.Join(cfg.Folder, "2026-11-16 14-05", excelName) // its CSVs imported and deleted
+	writeFiles(t, old, map[string]string{"products.xlsx": "customer data"})
+	writeFiles(t, dated, map[string]string{"products.xlsx": "customer data"})
 	if _, err := run(cfg, noPull, io.Discard); err == nil {
 		t.Fatal("want a connection error")
 	}
-	if _, err := os.Stat(filepath.Join(cfg.excel(), "products.xlsx")); err == nil {
-		t.Fatal("the copy must be gone")
+	for _, dir := range []string{old, dated} {
+		if _, err := os.Stat(filepath.Join(dir, "products.xlsx")); err == nil {
+			t.Fatalf("%s: the copy must be gone", dir)
+		}
 	}
 }
 
