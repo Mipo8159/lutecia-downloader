@@ -103,11 +103,11 @@ func reshape(t table, header []string) ([][]string, error) {
 	return rows, nil
 }
 
-// keyFunc picks what identifies a record by its first row: products have an External ID, deals a Deal key;
-// contacts a Contact key; companies carry theirs at the start of Comment ("Key: IVF-CO-501; ..."), as did contacts
+// keyFunc picks what identifies a record by its first row: products have an External ID, deals a Deal key,
+// tracking events an id; contacts a Contact key; companies carry theirs at the start of Comment ("Key: IVF-CO-501; ..."), as did contacts
 // before 2026-10-19 (so a contact without a Contact key yet is found by its Comment). Otherwise the whole row.
 func keyFunc(header []string) func([]string) string {
-	for _, name := range []string{"External ID", "Deal key"} {
+	for _, name := range []string{"External ID", "Deal key", "id"} {
 		if i := slices.Index(header, name); i >= 0 {
 			return func(row []string) string { return row[i] }
 		}
@@ -196,4 +196,69 @@ func countRows(path string) (int, error) {
 		return 0, fmt.Errorf("%s: %w (delete it if it is already imported, then run this again)", filepath.Base(path), err)
 	}
 	return len(records(t.rows, t.header[0] == "ID")), nil
+}
+
+// idIndex: a tracking file being built in this download, its header and the event ids already in it.
+type idIndex struct {
+	header []string
+	ids    map[string]bool
+}
+
+// appendByID adds a newer bundle's tracking events to dst: only ids not in it yet, at the end, without reading or
+// rewriting what is there (a first download folds hundreds of bundles of a file that only grows). A changed header
+// (the server added a field) goes through mergeCSV, which reshapes the older rows; the index starts again after it.
+func appendByID(dst, src string, index map[string]*idIndex) error {
+	newer, err := readCSV(src)
+	if err != nil {
+		return fmt.Errorf("%s from the server: %w", filepath.Base(src), err)
+	}
+	col := slices.Index(newer.header, "id")
+	at := index[dst]
+	if col < 0 || (at != nil && !slices.Equal(at.header, newer.header)) {
+		delete(index, dst)
+		return mergeCSV(dst, src)
+	}
+	if at == nil {
+		at = &idIndex{header: newer.header, ids: map[string]bool{}}
+		if older, err := readCSV(dst); err == nil { // a file this download did not start (should not happen)
+			if !slices.Equal(older.header, newer.header) {
+				return mergeCSV(dst, src)
+			}
+			for _, row := range older.rows {
+				at.ids[row[col]] = true
+			}
+		} else if !errors.Is(err, os.ErrNotExist) {
+			return fmt.Errorf("%s: %w", dst, err)
+		}
+		index[dst] = at
+	}
+	var add [][]string
+	for _, row := range newer.rows {
+		if !at.ids[row[col]] {
+			at.ids[row[col]] = true
+			add = append(add, row)
+		}
+	}
+	var buf bytes.Buffer
+	if _, err := os.Stat(dst); errors.Is(err, os.ErrNotExist) {
+		buf.WriteString("\ufeff")
+		add = append([][]string{newer.header}, add...)
+	} else if len(add) == 0 {
+		return nil
+	}
+	w := csv.NewWriter(&buf)
+	w.UseCRLF = newer.crlf
+	w.WriteAll(add)
+	if err := w.Error(); err != nil {
+		return err
+	}
+	f, err := os.OpenFile(dst, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o644)
+	if err != nil {
+		return lockedError(dst, err)
+	}
+	if _, err := f.Write(buf.Bytes()); err != nil {
+		f.Close()
+		return err
+	}
+	return f.Close()
 }

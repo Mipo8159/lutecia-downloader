@@ -909,3 +909,37 @@ func TestTrackingFilesGoIntoTheirOwnFolder(t *testing.T) {
 		t.Fatalf("closing message for tracking only:\n%s", msg)
 	}
 }
+
+// Tracking events are appended by id: an event in two bundles (a server cursor reset) is there once, the first copy
+// kept; a field the server adds later reshapes the older rows; the Excel copy of a file too big for one sheet comes in
+// parts, each with the header.
+func TestTrackingEventsAppendByIDAndSplitForExcel(t *testing.T) {
+	head := "id,user_id,created\r\n"
+	files := map[string]map[string]string{
+		"2026-10-14_030000": {"tracking_events.csv": head + "1,,a\r\n2,53,b\r\n"},
+		"2026-10-14_060000": {"tracking_events.csv": head + "2,53,b-changed\r\n3,,c\r\n"},
+		"2026-10-14_090000": {"tracking_events.csv": "id,user_id,created,device\r\n4,,d,mobile\r\n"},
+	}
+	f := &fake{ids: []string{"2026-10-14_030000", "2026-10-14_060000", "2026-10-14_090000"}, files: files}
+	cfg := testConfig(t, newFake(t, f).URL)
+	old := maxSheetRows
+	maxSheetRows = 3 // header + 2 rows per sheet
+	t.Cleanup(func() { maxSheetRows = old })
+
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := filepath.Join(res.Folder, trackingName)
+	if got := read(t, filepath.Join(tr, "tracking_events.csv")); got != "id,user_id,created,device\r\n1,,a,\r\n2,53,b,\r\n3,,c,\r\n4,,d,mobile\r\n" {
+		t.Fatalf("one row per id, the first kept, older rows reshaped for the new field:\n%s", got)
+	}
+	for _, x := range []string{"tracking_events (part 1).xlsx", "tracking_events (part 2).xlsx"} {
+		if _, err := os.Stat(filepath.Join(tr, excelName, x)); err != nil {
+			t.Fatalf("Excel copy in parts: %v", err)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(tr, excelName, "tracking_events (part 3).xlsx")); err == nil {
+		t.Fatal("4 rows at 2 per sheet are 2 parts")
+	}
+}

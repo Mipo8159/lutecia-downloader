@@ -368,8 +368,9 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 		return res, err
 	}
 	defer os.RemoveAll(tmp) // gone once renamed; otherwise the half-made folder
+	events := map[string]*idIndex{} // tracking files of this folder: appended by id, never re-read per bundle
 	for _, b := range todo {
-		if err := merge(client, cfg, b, tmp); err != nil {
+		if err := merge(client, cfg, b, tmp, events); err != nil {
 			return res, err
 		}
 	}
@@ -400,7 +401,7 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 		res.ExcelReady = false
 		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The import files are fine.\n", err)
 	}
-	// The tracking files' own copies, for looking (tracking_views is a report, never imported).
+	// The tracking files' own copies, for looking (tracking events are never imported).
 	if len(res.Tracking) > 0 {
 		if _, err := makeExcel(tracking, filepath.Join(tracking, excelName), res.Tracking); err != nil {
 			fmt.Fprintf(out, "Not all Excel copies of the tracking files could be made: %v.\n", err)
@@ -516,7 +517,7 @@ var makeExcel = syncExcel
 
 // merge downloads one bundle's CSV files into a temporary folder, checks each is complete, and only then merges
 // them into the files in dst (a newer row replaces the row with the same key).
-func merge(client *http.Client, cfg config, b bundle, dst string) error {
+func merge(client *http.Client, cfg config, b bundle, dst string, events map[string]*idIndex) error {
 	tmp, err := os.MkdirTemp("", "lutecia-")
 	if err != nil {
 		return err
@@ -546,6 +547,12 @@ func merge(client *http.Client, cfg config, b bundle, dst string) error {
 			if err := os.MkdirAll(into, 0o755); err != nil {
 				return err
 			}
+		}
+		if into != dst {
+			if err := appendByID(filepath.Join(into, local), filepath.Join(tmp, name), events); err != nil {
+				return err
+			}
+			continue
 		}
 		if err := mergeCSV(filepath.Join(into, local), filepath.Join(tmp, name)); err != nil {
 			return err

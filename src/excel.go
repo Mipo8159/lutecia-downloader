@@ -27,8 +27,8 @@ var numberColumns = map[string]bool{"Price": true, "Amount": true, "Quantity": t
 // maxCellChars: Excel refuses a file with a longer cell (its limit is 32,767).
 const maxCellChars = 32000
 
-// maxSheetRows is Excel's limit, the header included.
-const maxSheetRows = 1048576
+// maxSheetRows is Excel's limit, the header included (a var: tests make it small).
+var maxSheetRows = 1048576
 
 var plainNumber = regexp.MustCompile(`^-?[0-9]+(\.[0-9]+)?$`)
 
@@ -77,7 +77,7 @@ func syncExcel(production, excel string, files []fileRows) (ready bool, err erro
 		}
 	}
 	if len(failed) > 0 {
-		return false, fmt.Errorf("%s may still show older data: close them in Excel and run this again", strings.Join(failed, ", "))
+		return false, fmt.Errorf("%s may still show older data: if open, close them in Excel and run this again", strings.Join(failed, ", "))
 	}
 	return true, nil
 }
@@ -94,6 +94,24 @@ func syncOne(src, dst string) error {
 	t, err := readCSV(src)
 	if err != nil {
 		return err
+	}
+	// More rows than an Excel sheet holds (a first download of years of tracking events): copies in parts,
+	// "name (part 1).xlsx", "name (part 2).xlsx", ... each with the header.
+	per := maxSheetRows - 1
+	if len(t.rows) > per {
+		base := strings.TrimSuffix(dst, ".xlsx")
+		for i := 0; i*per < len(t.rows); i++ {
+			part := t
+			part.rows = t.rows[i*per : min((i+1)*per, len(t.rows))]
+			name := fmt.Sprintf("%s (part %d).xlsx", base, i+1)
+			if err := writeXLSX(name, part); err != nil {
+				return err
+			}
+			if err := os.Chtimes(name, s.ModTime(), s.ModTime()); err != nil {
+				return err
+			}
+		}
+		return nil
 	}
 	if err := writeXLSX(dst, t); err != nil {
 		return err
