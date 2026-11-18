@@ -107,6 +107,16 @@ func writeTestSlice(production, test string) (made bool, err error) {
 		{"offline_contacts.csv", contacts, keep(contacts.rows, contactKey, keys)},
 		{"offline_deals.csv", deals, dealRows},
 	}
+	// Tracking events: the 10 newest product views and the 10 newest brand views, in their order.
+	if events, err := readIfThere(filepath.Join(production, trackingFile)); err != nil {
+		return false, err
+	} else if events != nil {
+		out = append(out, struct {
+			name string
+			t    *table
+			rows [][]string
+		}{trackingFile, events, newestPerType(events, 10)})
+	}
 	for _, f := range out {
 		t := *f.t
 		t.rows = f.rows
@@ -191,4 +201,27 @@ func readIfThere(path string) (*table, error) {
 		return nil, fmt.Errorf("%s: %w", filepath.Base(path), err)
 	}
 	return &t, nil
+}
+
+// newestPerType: the last n rows of each entity_type (product, brand), kept in file order.
+func newestPerType(t *table, n int) [][]string {
+	col := slices.Index(t.header, "entity_type")
+	taken := map[string]int{}
+	var keep []int
+	for i := len(t.rows) - 1; i >= 0; i-- {
+		k := ""
+		if col >= 0 {
+			k = t.rows[i][col]
+		}
+		if taken[k] < n {
+			taken[k]++
+			keep = append(keep, i)
+		}
+	}
+	slices.Sort(keep)
+	out := make([][]string, len(keep))
+	for i, r := range keep {
+		out[i] = t.rows[r]
+	}
+	return out
 }

@@ -295,3 +295,37 @@ func TestUTF8MarkerFromTheServerIsKept(t *testing.T) {
 		t.Fatal("the marker must not reach the Excel copy")
 	}
 }
+
+// The test set of the first download also has a few tracking events: the 10 newest of each type, in their order.
+func TestSliceHasTheNewestTrackingEventsOfEachType(t *testing.T) {
+	dir := t.TempDir()
+	prod, test := filepath.Join(dir, "production"), filepath.Join(dir, "test")
+	files := sliceFixture()
+	var ev strings.Builder
+	ev.WriteString("id,entity_type,created\r\n")
+	for i := 1; i <= 30; i++ {
+		kind := "product"
+		if i%3 == 0 {
+			kind = "brand"
+		}
+		fmt.Fprintf(&ev, "%d,%s,t%d\r\n", i, kind, i)
+	}
+	files["tracking_events.csv"] = ev.String()
+	writeFiles(t, prod, files)
+	if made, err := writeTestSlice(prod, test); !made || err != nil {
+		t.Fatal(made, err)
+	}
+	tt, err := readCSV(filepath.Join(test, "tracking_events.csv"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var ids []string
+	for _, r := range tt.rows {
+		ids = append(ids, r[0])
+	}
+	// brands: every third id (3..30: 10, all kept); products: the newest 10 of the 20 (16, 17, 19, ... 29)
+	want := []string{"3", "6", "9", "12", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24", "25", "26", "27", "28", "29", "30"}
+	if !reflect.DeepEqual(ids, want) {
+		t.Fatalf("%v", ids)
+	}
+}

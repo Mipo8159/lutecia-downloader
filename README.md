@@ -39,16 +39,16 @@ The server remembers when this office last downloaded, so each folder holds only
 it. **Import the folders oldest first, each one once, then delete it.** A folder holds:
 
 - the files to import (`products.csv`, `offline_contacts.csv`, ...). If you open one in Excel, don't save it.
+- **`tracking_events.csv`** (since 2026-11-19): the web shop's tracking events (which product or brand page was
+  opened, when), exactly as the shop sends them, one row per page view. The first download has every event since
+  2026-11-05; each later folder only the events since the folder before. Bitrix24 has no import for it: look at it
+  in the `excel` folder (`tracking_events.xlsx`; very large downloads come in parts, `(part 1)`, `(part 2)`).
 - **`excel`**: copies for looking at the data. Double-click them; Georgian text, columns and barcodes show correctly.
   Never import these into Bitrix. They hold customer data: delete them with the folder (if you delete only the
   import files, the next double-click removes the copies).
 - **`test`** (only in the first, "everything" folder): a small part of it (about 10 deals, their buyers and their
-  products) for trying an import. The test deals have names starting with `TEST`: delete them in Bitrix before
+  products, plus 20 recent tracking events) for trying an import. The test deals have names starting with `TEST`: delete them in Bitrix before
   importing the real files, or those deals are there twice. Temporary: may be dropped later.
-- **`tracking`** (since 2026-11-19): `tracking_events.csv`, the web shop's tracking events (what visitors looked at
-  on lutecia.ge) exactly as the shop sends them, one row per event. The first download has every event since
-  2026-11-05; each later folder only the events since the folder before. Its own **`excel`** folder has a copy for
-  looking. **Not a Bitrix24 import file.**
 
 Import the files of each folder into Bitrix24 **in this order**, then **delete the folder**:
 

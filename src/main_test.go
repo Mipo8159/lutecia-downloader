@@ -854,10 +854,10 @@ func TestFreshStartThatCannotMoveEverythingPutsItAllBack(t *testing.T) {
 	}
 }
 
-// Site tracking (2026-11-19): tracking_events.csv (the shop's events untouched) goes into the dated folder's tracking/
-// folder with its own Excel copy, merges across bundles (one row per event, values kept as they are, trailing spaces
-// too), never counts as an import file, and a download with only tracking still makes a folder.
-func TestTrackingFilesGoIntoTheirOwnFolder(t *testing.T) {
+// Site tracking (2026-11-19): tracking_events.csv (the shop's events untouched) sits next to the other files with its
+// Excel copy in the same excel folder, merges across bundles by id (values as sent, trailing spaces too), and is
+// listed with the others but not in the Bitrix import order.
+func TestTrackingEventsSitNextToTheOtherFiles(t *testing.T) {
 	head := "id,user_id,session_id,entity_type,entity_id,entity.id,entity.title_en,entity.title_ge,entity.slug_en,entity.slug_ge,entity.active,event_type,created\r\n"
 	e1 := "1,,s1,product,8733,8733,Luna Rossa ,ლუნა როსა ,luna,luna,,view,2026-11-05 20:03:46\r\n"
 	e2 := "2,53,s2,brand,136,136,YSL,YSL,ysl,ysl,true,view,2026-11-05 20:03:48\r\n"
@@ -874,39 +874,35 @@ func TestTrackingFilesGoIntoTheirOwnFolder(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := filepath.Join(res.Folder, trackingName)
-	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) ||
-		!reflect.DeepEqual(res.Tracking, []fileRows{{"tracking_events.csv", 2}}) {
-		t.Fatalf("tracking is counted apart from the import files: %+v / %+v", res.Files, res.Tracking)
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}, {"tracking_events.csv", 2}}) {
+		t.Fatalf("tracking is listed last, next to the others: %+v", res.Files)
 	}
-	if got := read(t, filepath.Join(tr, "tracking_events.csv")); got != head+e1+e2 {
+	if got := read(t, filepath.Join(res.Folder, "tracking_events.csv")); got != head+e1+e2 {
 		t.Fatalf("events: every row of every bundle, as sent:\n%s", got)
 	}
-	if _, err := os.Stat(filepath.Join(tr, excelName, "tracking_events.xlsx")); err != nil {
-		t.Fatalf("Excel copy: %v", err)
+	if _, err := os.Stat(filepath.Join(res.Folder, excelName, "tracking_events.xlsx")); err != nil {
+		t.Fatalf("Excel copy in the excel folder: %v", err)
 	}
-	for _, x := range []string{"tracking_events.csv", filepath.Join(excelName, "tracking_events.xlsx")} {
-		if _, err := os.Stat(filepath.Join(res.Folder, x)); err == nil {
-			t.Fatalf("%s must not be in the main folder", x)
-		}
+	if _, err := os.Stat(filepath.Join(res.Folder, "tracking")); err == nil {
+		t.Fatal("no tracking subfolder")
 	}
 	msg := summary(cfg, res)
 	if !strings.Contains(msg, "Import into Bitrix24 in this order: products.csv, then offline_contacts.csv.") ||
-		!strings.Contains(msg, "not a Bitrix24 import file") || !strings.Contains(msg, tr) {
+		!strings.Contains(msg, "tracking_events.csv  2 events") || !strings.Contains(msg, "Bitrix24 has no import for them") {
 		t.Fatalf("closing message:\n%s", msg)
 	}
 
-	// Only tracking is new (the other files are empty): still a folder, with just tracking/.
+	// Only tracking is new: a folder with just tracking_events.csv (no empty files) and its copy.
 	f.ids = append(f.ids, "2026-10-15_030000")
 	res, err = run(cfg, noPull, io.Discard)
-	if err != nil || res.Folder == "" || len(res.Files) != 0 || !reflect.DeepEqual(res.Tracking, []fileRows{{"tracking_events.csv", 1}}) {
+	if err != nil || !reflect.DeepEqual(res.Files, []fileRows{{"tracking_events.csv", 1}}) {
 		t.Fatalf("a tracking-only download: %+v %v", res, err)
 	}
-	if got := read(t, filepath.Join(res.Folder, trackingName, "tracking_events.csv")); got != head+e3 {
+	if got := read(t, filepath.Join(res.Folder, "tracking_events.csv")); got != head+e3 {
 		t.Fatalf("the next folder holds only the new events:\n%s", got)
 	}
-	if msg := summary(cfg, res); !strings.Contains(msg, "Only new site tracking") || strings.Contains(msg, "Import into Bitrix24 in this order") {
-		t.Fatalf("closing message for tracking only:\n%s", msg)
+	if msg := summary(cfg, res); strings.Contains(msg, "Import into Bitrix24 in this order") {
+		t.Fatalf("nothing to import into Bitrix:\n%s", msg)
 	}
 }
 
@@ -930,16 +926,15 @@ func TestTrackingEventsAppendByIDAndSplitForExcel(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	tr := filepath.Join(res.Folder, trackingName)
-	if got := read(t, filepath.Join(tr, "tracking_events.csv")); got != "id,user_id,created,device\r\n1,,a,\r\n2,53,b,\r\n3,,c,\r\n4,,d,mobile\r\n" {
+	if got := read(t, filepath.Join(res.Folder, "tracking_events.csv")); got != "id,user_id,created,device\r\n1,,a,\r\n2,53,b,\r\n3,,c,\r\n4,,d,mobile\r\n" {
 		t.Fatalf("one row per id, the first kept, older rows reshaped for the new field:\n%s", got)
 	}
 	for _, x := range []string{"tracking_events (part 1).xlsx", "tracking_events (part 2).xlsx"} {
-		if _, err := os.Stat(filepath.Join(tr, excelName, x)); err != nil {
+		if _, err := os.Stat(filepath.Join(res.Folder, excelName, x)); err != nil {
 			t.Fatalf("Excel copy in parts: %v", err)
 		}
 	}
-	if _, err := os.Stat(filepath.Join(tr, excelName, "tracking_events (part 3).xlsx")); err == nil {
+	if _, err := os.Stat(filepath.Join(res.Folder, excelName, "tracking_events (part 3).xlsx")); err == nil {
 		t.Fatal("4 rows at 2 per sheet are 2 parts")
 	}
 }
