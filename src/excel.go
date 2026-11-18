@@ -22,7 +22,8 @@ import (
 // barcodes (4.8E+12), and drop the leading zeros of phones and codes.
 var numberColumns = map[string]bool{"Price": true, "Amount": true, "Quantity": true, "Items": true, "Purchases": true,
 	"Total spend": true, "Average purchase": true, "Purchases (last year)": true, "Spend (last year)": true,
-	"Returns": true, "Card discount %": true, "Loyalty points": true, "Online orders": true, "Online spend": true}
+	"Returns": true, "Card discount %": true, "Loyalty points": true, "Online orders": true, "Online spend": true,
+	"Views": true, "Visitors": true, "Logged-in views": true, "Views that day": true}
 
 // maxCellChars: Excel refuses a file with a longer cell (its limit is 32,767).
 const maxCellChars = 32000

@@ -49,6 +49,8 @@ const (
 	productionName = "production" // before checkpoints: one folder all downloads were merged into
 	testName       = "test"
 	excelName      = "excel"
+	trackingName   = "tracking"  // in a dated folder: the shop's site tracking (tracking_*.csv), apart from the import files
+	trackingPrefix = "tracking_" // the server's tracking files
 	stampLayout    = "2006-01-02 15-04"     // a dated folder's name: no ':' (Windows), and name order is time order
 	everything     = " (everything)"        // the first download's folder
 	freshPrefix    = "Before fresh start "  // -fresh moves what this computer had into "<prefix><date time>"
@@ -75,7 +77,9 @@ var (
 	importOrder = []string{"products.csv", "companies.csv", "offline_contacts.csv", "online_contacts.csv",
 		"offline_deals.csv", "online_deals.csv", "b2b_deals.csv"}
 	nouns = map[string]string{"products.csv": "products", "companies.csv": "companies", "offline_contacts.csv": "contacts",
-		"online_contacts.csv": "contacts", "offline_deals.csv": "deals", "online_deals.csv": "deals", "b2b_deals.csv": "deals"}
+		"online_contacts.csv": "contacts", "offline_deals.csv": "deals", "online_deals.csv": "deals", "b2b_deals.csv": "deals",
+		"tracking_views.csv": "rows", "tracking_contacts.csv": "contacts"}
+	trackingOrder = []string{"tracking_views.csv", "tracking_contacts.csv"}
 	// The server's name for a file -> the name the client gets. Others keep their name.
 	localNames = map[string]string{"contacts.csv": "offline_contacts.csv", "deals.csv": "offline_deals.csv"}
 )
@@ -128,6 +132,7 @@ type result struct {
 	Waiting       []string   // every folder still there to import, oldest first ("production" from older copies first)
 	TestReady     bool       // the test folder in it was made
 	ExcelReady    bool       // the excel folder in it holds a copy of each file
+	Tracking      []fileRows // what its tracking folder holds (none: no tracking folder)
 }
 
 func (c config) production() string { return filepath.Join(c.Folder, productionName) }
@@ -203,6 +208,9 @@ func summary(cfg config, res result) string {
 	} else if res.Since != "" {
 		fmt.Fprintf(&b, "It holds only what is new or changed since the previous download (data up to %s).\n\n", res.Since)
 	}
+	if len(res.Files) == 0 {
+		b.WriteString("Only new site tracking this time: nothing to import into Bitrix24 from the main folder.\n")
+	}
 	names := make([]string, len(res.Files))
 	for i, f := range res.Files {
 		noun := nouns[f.Name]
@@ -212,7 +220,9 @@ func summary(cfg config, res result) string {
 		fmt.Fprintf(&b, "   %-20s %s %s\n", f.Name, thousands(f.Rows), noun)
 		names[i] = f.Name
 	}
-	fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
+	if len(names) > 0 {
+		fmt.Fprintf(&b, "\nImport into Bitrix24 in this order: %s.\n", strings.Join(names, ", then "))
+	}
 	b.WriteString("In the Bitrix24 import choose: encoding UTF-8, separator comma.\n" +
 		"Do not open these files in Excel and never save them from Excel: that breaks Georgian letters and phone numbers.\n")
 	b.WriteString("When everything is imported, delete this folder. The next download makes a new one with only what is new.")
@@ -226,6 +236,14 @@ func summary(cfg config, res result) string {
 	if res.ExcelReady {
 		fmt.Fprintf(&b, "\n\nTo look at the data, double-click the files in\n  %s\n"+
 			"Those are only for looking: always import the .csv files into Bitrix24.", filepath.Join(res.Folder, excelName))
+	}
+	if len(res.Tracking) > 0 {
+		fmt.Fprintf(&b, "\n\nSite tracking (who looked at what on lutecia.ge) is in\n  %s\n", filepath.Join(res.Folder, trackingName))
+		for _, f := range res.Tracking {
+			fmt.Fprintf(&b, "   %-22s %s %s\n", f.Name, thousands(f.Rows), nouns[f.Name])
+		}
+		b.WriteString("tracking_views is a report: look at it in the excel folder there, do not import it.\n" +
+			"tracking_contacts can be imported into Contacts (duplicate control by Contact key, replace), after online_contacts.")
 	}
 	if res.TestReady {
 		fmt.Fprintf(&b, "\n\nTo try an import first, use the small files in\n  %s\n"+
@@ -362,7 +380,17 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	res.Files = slices.DeleteFunc(res.Files, func(f fileRows) bool {
 		return f.Rows == 0 && os.Remove(filepath.Join(tmp, f.Name)) == nil
 	})
-	if len(res.Files) == 0 {
+	tracking := filepath.Join(tmp, trackingName)
+	if res.Tracking, err = countFiles(tracking); err != nil {
+		return res, err
+	}
+	res.Tracking = slices.DeleteFunc(res.Tracking, func(f fileRows) bool {
+		return f.Rows == 0 && os.Remove(filepath.Join(tracking, f.Name)) == nil
+	})
+	if len(res.Tracking) == 0 {
+		os.Remove(tracking) // only when empty
+	}
+	if len(res.Files) == 0 && len(res.Tracking) == 0 {
 		// Nothing to import at all: no folder, and the checkpoint stays, so these bundles go into the next real
 		// folder and the server's map has no gap.
 		fmt.Fprintln(out, "The server's new data holds no changes.")
@@ -371,6 +399,12 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	if res.ExcelReady, err = makeExcel(tmp, filepath.Join(tmp, excelName), res.Files); err != nil {
 		res.ExcelReady = false
 		fmt.Fprintf(out, "Not all Excel copies could be made: %v. The import files are fine.\n", err)
+	}
+	// The tracking files' own copies, for looking (tracking_views is a report, never imported).
+	if len(res.Tracking) > 0 {
+		if _, err := makeExcel(tracking, filepath.Join(tracking, excelName), res.Tracking); err != nil {
+			fmt.Fprintf(out, "Not all Excel copies of the tracking files could be made: %v.\n", err)
+		}
 	}
 	if res.FirstDownload {
 		if res.TestReady, err = writeTestSlice(tmp, filepath.Join(tmp, testName)); err != nil {
@@ -506,7 +540,14 @@ func merge(client *http.Client, cfg config, b bundle, dst string) error {
 		if l, ok := localNames[name]; ok {
 			local = l
 		}
-		if err := mergeCSV(filepath.Join(dst, local), filepath.Join(tmp, name)); err != nil {
+		into := dst
+		if strings.HasPrefix(name, trackingPrefix) {
+			into = filepath.Join(dst, trackingName)
+			if err := os.MkdirAll(into, 0o755); err != nil {
+				return err
+			}
+		}
+		if err := mergeCSV(filepath.Join(into, local), filepath.Join(tmp, name)); err != nil {
 			return err
 		}
 	}
@@ -682,7 +723,10 @@ func countFiles(folder string) ([]fileRows, error) {
 		if i := slices.Index(importOrder, name); i >= 0 {
 			return i
 		}
-		return len(importOrder)
+		if i := slices.Index(trackingOrder, name); i >= 0 {
+			return len(importOrder) + i
+		}
+		return len(importOrder) + len(trackingOrder)
 	}
 	slices.SortStableFunc(files, func(a, b fileRows) int { return rank(a.Name) - rank(b.Name) })
 	return files, nil

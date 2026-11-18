@@ -103,11 +103,11 @@ func reshape(t table, header []string) ([][]string, error) {
 	return rows, nil
 }
 
-// keyFunc picks what identifies a record by its first row: products have an External ID and deals a Deal key;
-// contacts a Contact key; companies carry theirs at the start of Comment ("Key: IVF-CO-501; ..."), as did contacts
+// keyFunc picks what identifies a record by its first row: products have an External ID, deals a Deal key, tracking
+// views a View key; contacts a Contact key; companies carry theirs at the start of Comment ("Key: IVF-CO-501; ..."), as did contacts
 // before 2026-10-19 (so a contact without a Contact key yet is found by its Comment). Otherwise the whole row.
 func keyFunc(header []string) func([]string) string {
-	for _, name := range []string{"External ID", "Deal key"} {
+	for _, name := range []string{"External ID", "Deal key", "View key"} {
 		if i := slices.Index(header, name); i >= 0 {
 			return func(row []string) string { return row[i] }
 		}

@@ -853,3 +853,66 @@ func TestFreshStartThatCannotMoveEverythingPutsItAllBack(t *testing.T) {
 		t.Fatalf("a plain run puts the server back at the old place and lists both folders: %+v %v %q", res, err, f.checkpoint)
 	}
 }
+
+// Site tracking (2026-11-18): tracking_* files go into the dated folder's tracking/ folder with their own Excel copies,
+// merge across bundles (views by View key, contacts by Contact key), never count as import files, and a download
+// with only tracking still makes a folder.
+func TestTrackingFilesGoIntoTheirOwnFolder(t *testing.T) {
+	viewsHead := "View key,Date,Type,Site ID,Name,Name (Georgian),Views,Visitors,Logged-in views\r\n"
+	tcHead := "First name,Contact key,Last site visit,Views that day,Products viewed that day,Brands viewed that day\r\n"
+	files := twoBundles()
+	files["2026-10-14_030000"]["tracking_views.csv"] = viewsHead + "2026-10-13|product|1,13.10.2026,Product,1,A,ა,3,2,1\r\n"
+	files["2026-10-14_030000"]["tracking_contacts.csv"] = tcHead + "Ana,K1,13.10.2026 10:00,1,A,\r\n"
+	files["2026-10-14_060000"]["tracking_views.csv"] = viewsHead + "2026-10-14|brand|9,14.10.2026,Brand,9,B,,5,5,0\r\n"
+	files["2026-10-14_060000"]["tracking_contacts.csv"] = tcHead + "Ana,K1,14.10.2026 11:00,2,\"A; C\",B\r\n"
+	files["2026-10-15_030000"] = map[string]string{"products.csv": productsHead, "contacts.csv": contactsHead,
+		"tracking_views.csv": viewsHead + "2026-10-14|product|1,14.10.2026,Product,1,A,ა,1,1,0\r\n", "tracking_contacts.csv": tcHead}
+	f := &fake{ids: []string{"2026-10-14_030000", "2026-10-14_060000"}, files: files}
+	cfg := testConfig(t, newFake(t, f).URL)
+
+	res, err := run(cfg, noPull, io.Discard)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tr := filepath.Join(res.Folder, trackingName)
+	if !reflect.DeepEqual(res.Files, []fileRows{{"products.csv", 3}, {"offline_contacts.csv", 1}}) ||
+		!reflect.DeepEqual(res.Tracking, []fileRows{{"tracking_views.csv", 2}, {"tracking_contacts.csv", 1}}) {
+		t.Fatalf("tracking is counted apart from the import files: %+v / %+v", res.Files, res.Tracking)
+	}
+	if got := read(t, filepath.Join(tr, "tracking_views.csv")); got != viewsHead+
+		"2026-10-13|product|1,13.10.2026,Product,1,A,ა,3,2,1\r\n2026-10-14|brand|9,14.10.2026,Brand,9,B,,5,5,0\r\n" {
+		t.Fatalf("views: one row per View key, appended:\n%s", got)
+	}
+	if got := read(t, filepath.Join(tr, "tracking_contacts.csv")); got != tcHead+"Ana,K1,14.10.2026 11:00,2,A; C,B\r\n" {
+		t.Fatalf("contacts: the latest visit replaces the older one:\n%s", got)
+	}
+	for _, x := range []string{"tracking_views.xlsx", "tracking_contacts.xlsx"} {
+		if _, err := os.Stat(filepath.Join(tr, excelName, x)); err != nil {
+			t.Fatalf("Excel copy of %s: %v", x, err)
+		}
+	}
+	for _, x := range []string{"tracking_views.csv", filepath.Join(excelName, "tracking_views.xlsx")} {
+		if _, err := os.Stat(filepath.Join(res.Folder, x)); err == nil {
+			t.Fatalf("%s must not be in the main folder", x)
+		}
+	}
+	msg := summary(cfg, res)
+	if !strings.Contains(msg, "Import into Bitrix24 in this order: products.csv, then offline_contacts.csv.") ||
+		!strings.Contains(msg, "do not import it") || !strings.Contains(msg, tr) {
+		t.Fatalf("closing message:\n%s", msg)
+	}
+
+	// Only tracking is new (the other files are empty): still a folder, with just tracking/ (no empty contacts file).
+	f.ids = append(f.ids, "2026-10-15_030000")
+	res, err = run(cfg, noPull, io.Discard)
+	if err != nil || res.Folder == "" || len(res.Files) != 0 ||
+		!reflect.DeepEqual(res.Tracking, []fileRows{{"tracking_views.csv", 1}}) {
+		t.Fatalf("a tracking-only download: %+v %v", res, err)
+	}
+	if _, err := os.Stat(filepath.Join(res.Folder, trackingName, "tracking_contacts.csv")); err == nil {
+		t.Fatal("no empty tracking_contacts.csv")
+	}
+	if msg := summary(cfg, res); !strings.Contains(msg, "Only new site tracking") || strings.Contains(msg, "Import into Bitrix24 in this order") {
+		t.Fatalf("closing message for tracking only:\n%s", msg)
+	}
+}
