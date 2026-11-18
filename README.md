@@ -45,6 +45,10 @@ it. **Import the folders oldest first, each one once, then delete it.** A folder
 - **`test`** (only in the first, "everything" folder): a small part of it (about 10 deals, their buyers and their
   products) for trying an import. The test deals have names starting with `TEST`: delete them in Bitrix before
   importing the real files, or those deals are there twice. Temporary: may be dropped later.
+- **`tracking`** (since 2026-11-19): `tracking_events.csv`, the web shop's tracking events (what visitors looked at
+  on lutecia.ge) exactly as the shop sends them, one row per event. The first download has every event since
+  2026-11-05; each later folder only the events since the folder before. Its own **`excel`** folder has a copy for
+  looking. **Not a Bitrix24 import file.**
 
 Import the files of each folder into Bitrix24 **in this order**, then **delete the folder**:
 

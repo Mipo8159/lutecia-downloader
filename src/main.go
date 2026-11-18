@@ -78,8 +78,8 @@ var (
 		"offline_deals.csv", "online_deals.csv", "b2b_deals.csv"}
 	nouns = map[string]string{"products.csv": "products", "companies.csv": "companies", "offline_contacts.csv": "contacts",
 		"online_contacts.csv": "contacts", "offline_deals.csv": "deals", "online_deals.csv": "deals", "b2b_deals.csv": "deals",
-		"tracking_views.csv": "rows", "tracking_contacts.csv": "contacts"}
-	trackingOrder = []string{"tracking_views.csv", "tracking_contacts.csv"}
+		"tracking_events.csv": "events"}
+	trackingOrder = []string{"tracking_events.csv"}
 	// The server's name for a file -> the name the client gets. Others keep their name.
 	localNames = map[string]string{"contacts.csv": "offline_contacts.csv", "deals.csv": "offline_deals.csv"}
 )
@@ -242,8 +242,8 @@ func summary(cfg config, res result) string {
 		for _, f := range res.Tracking {
 			fmt.Fprintf(&b, "   %-22s %s %s\n", f.Name, thousands(f.Rows), nouns[f.Name])
 		}
-		b.WriteString("tracking_views is a report: look at it in the excel folder there, do not import it.\n" +
-			"tracking_contacts can be imported into Contacts (duplicate control by Contact key, replace), after online_contacts.")
+		b.WriteString("These are the web shop's tracking events as the shop sends them, one row per event. Look at them in the\n" +
+			"excel folder there. They are not a Bitrix24 import file.")
 	}
 	if res.TestReady {
 		fmt.Fprintf(&b, "\n\nTo try an import first, use the small files in\n  %s\n"+
