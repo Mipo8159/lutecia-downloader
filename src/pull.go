@@ -111,6 +111,9 @@ func fetchFile(client *http.Client, cfg config, id, name string, size int64, pat
 	if cerr := f.Close(); err == nil {
 		err = cerr
 	}
+	if errors.Is(err, os.ErrDeadlineExceeded) {
+		return fmt.Errorf("%s: the connection stopped sending data: %w", name, err)
+	}
 	if err != nil {
 		return fmt.Errorf("%s: %w", name, err)
 	}
@@ -142,7 +145,7 @@ func call(client *http.Client, cfg config, method, path string, body io.Reader) 
 	switch res.StatusCode {
 	case http.StatusUnauthorized:
 		res.Body.Close()
-		return nil, fatalError{settingsError{"The server did not accept the access key (LUTECIA_TOKEN). Check it with Sweeft."}}
+		return nil, fatalError{settingsError{"The server did not accept the access key (LUTECIA_TOKEN). Check it with your admin."}}
 	case http.StatusServiceUnavailable:
 		res.Body.Close()
 		return nil, fatalError{errors.New("the server is not open for downloads (it has no token set)")}

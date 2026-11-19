@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,6 +24,7 @@ type fake struct {
 	ids      []string
 	files    map[string]map[string]string
 	short    string // "<id>/<file>" served cut in half
+	stall    string // "<id>/<file>": half is sent, then the connection goes silent (a dead Wi-Fi, a dropped router)
 	pullTo   string // a POST /heartbeat/runs creates this bundle ("" = pull adds nothing)
 	pullFail string // a POST /heartbeat/runs ends 'failed' with this note
 	busy     bool   // a pull is already running: POST gets 409, then it ends after one poll
@@ -157,6 +159,18 @@ func (f *fake) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		if parts[0]+"/"+parts[1] == f.short {
 			body = body[:len(body)/2]
+		}
+		if parts[0]+"/"+parts[1] == f.stall {
+			w.Header().Set("Content-Length", fmt.Sprint(len(body)))
+			io.WriteString(w, body[:len(body)/2])
+			w.(http.Flusher).Flush()
+			f.mu.Unlock() // the silent connection must not block the next run's requests
+			defer f.mu.Lock()
+			select {
+			case <-r.Context().Done():
+			case <-time.After(10 * time.Second):
+			}
+			return
 		}
 		io.WriteString(w, body)
 	}
@@ -583,6 +597,32 @@ func TestCutDownloadChangesNothingAndRetries(t *testing.T) {
 		t.Fatalf("a cut download must not move the server's checkpoint: %q %v", f.checkpoint, f.puts)
 	}
 	f.short = ""
+	if res, err := run(cfg, noPull, io.Discard); err != nil || len(res.New) != 1 {
+		t.Fatalf("retry: %+v %v", res, err)
+	}
+}
+
+// A connection that goes silent mid-file must end in "run this again", not a window that waits forever.
+func TestSilentConnectionStopsInsteadOfHanging(t *testing.T) {
+	f := &fake{ids: []string{"2026-10-14_030000"}, files: twoBundles(), stall: "2026-10-14_030000/contacts.csv"}
+	cfg := testConfig(t, newFake(t, f).URL)
+	done := make(chan error, 1)
+	go func() {
+		_, err := run(cfg, options{Stall: 300 * time.Millisecond}, io.Discard)
+		done <- err
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "stopped sending") || !strings.Contains(err.Error(), "run this again") {
+			t.Fatalf("want a stopped-sending error, got %v", err)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("still waiting after 5 s on a silent connection: the window would look frozen")
+	}
+	if entries, _ := os.ReadDir(cfg.Folder); len(entries) != 0 || f.checkpoint != "" {
+		t.Fatalf("a stalled download must change nothing: %d entries, checkpoint %q", len(entries), f.checkpoint)
+	}
+	f.stall = ""
 	if res, err := run(cfg, noPull, io.Discard); err != nil || len(res.New) != 1 {
 		t.Fatalf("retry: %+v %v", res, err)
 	}

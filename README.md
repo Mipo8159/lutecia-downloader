@@ -11,7 +11,7 @@ Mac/Lutecia.command        for Mac (Linux: run ./Lutecia.command in a terminal)
 
 1. Get this folder onto the computer: on GitHub **Code → Download ZIP**, then unzip it (or `git clone <repo url>`).
 2. Open the folder for your computer (**Windows** or **Mac**) and double-click **Lutecia**.
-3. The first time, a settings file opens (Notepad on Windows, TextEdit on Mac). Fill in the two lines Sweeft gives
+3. The first time, a settings file opens (Notepad on Windows, TextEdit on Mac). Fill in the two lines your admin gives
    you (`LUTECIA_SERVER`, `LUTECIA_TOKEN`), **save**, close it, and double-click **Lutecia** again.
 
 The settings are saved in `.env` next to the program; it is never uploaded to GitHub. Lutecia opens it again by
@@ -71,7 +71,7 @@ Each double-click brings only what is new or changed since the last download, in
 folder ("Everything is up to date"). Forgot to import before double-clicking again? Nothing is lost: import the older
 folder first, then the newer one (the closing message lists the folders still there). A new unzip in the same office
 also gets only what is new, because the server knows the office. **Never delete a folder before it is imported**: its
-data is not sent again (ask Sweeft if it happened).
+data is not sent again (ask your admin if it happened).
 
 Copies from before 2026-11-16 have one `production` folder that every download was merged into. It stays as it was:
 the first double-click of the new program tells the server what it holds, and from then on new data arrives in dated

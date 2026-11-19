@@ -23,6 +23,7 @@ package main
 
 import (
 	"bufio"
+	"context"
 	"crypto/sha256"
 	_ "embed"
 	"encoding/hex"
@@ -49,7 +50,7 @@ const (
 	productionName = "production" // before checkpoints: one folder all downloads were merged into
 	testName       = "test"
 	excelName      = "excel"
-	trackingFile   = "tracking_events.csv" // the web shop's tracking events: next to the other files, appended by id
+	trackingFile   = "tracking_events.csv"  // the web shop's tracking events: next to the other files, appended by id
 	stampLayout    = "2006-01-02 15-04"     // a dated folder's name: no ':' (Windows), and name order is time order
 	everything     = " (everything)"        // the first download's folder
 	freshPrefix    = "Before fresh start "  // -fresh moves what this computer had into "<prefix><date time>"
@@ -146,6 +147,7 @@ func main() {
 		*home = exeDir()
 	}
 
+	noQuickEdit()
 	fmt.Print("Lutecia -> Bitrix24\n\n")
 	cfg, err := loadConfig(*home)
 	var res result
@@ -163,7 +165,7 @@ func main() {
 		fmt.Printf("%s\n\nThe settings file is now open: fill it in, save it, close it, then double-click Lutecia again.\n", settings.msg)
 		openEditor(filepath.Join(*home, ".env"))
 	} else if err != nil {
-		fmt.Printf("\nSomething went wrong:\n  %v\n\nNothing was lost. Try again later; if it keeps happening, send a photo of this window to Sweeft.\n", err)
+		fmt.Printf("\nSomething went wrong:\n  %v\n\nNothing was lost. Try again later; if it keeps happening, send a photo of this window to your admin.\n", err)
 	} else {
 		fmt.Print("\n" + summary(cfg, res) + "\n")
 	}
@@ -254,6 +256,7 @@ type options struct {
 	Fresh       bool          // start over first (-fresh): this download is a first one, with everything
 	PollEvery   time.Duration // how often to check on that pull
 	PullTimeout time.Duration // stop waiting (the pull goes on; its data comes with the next click)
+	Stall       time.Duration // give up on a connection that sends nothing this long (0 = 2 minutes)
 }
 
 // run optionally pulls fresh data, then puts every bundle this computer has not had yet into one new dated folder.
@@ -268,11 +271,7 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 	if stuck := cleanAllExcel(cfg); len(stuck) > 0 {
 		fmt.Fprintf(out, "Please close %s in Excel and delete it: the data is no longer needed there.\n", strings.Join(stuck, ", "))
 	}
-	client := &http.Client{Transport: &http.Transport{
-		Proxy:                 http.ProxyFromEnvironment,
-		DialContext:           (&net.Dialer{Timeout: 15 * time.Second}).DialContext,
-		ResponseHeaderTimeout: 60 * time.Second,
-	}}
+	client := newClient(opts.Stall)
 	if opts.Pull {
 		stop := ticker(out, "Getting the latest data")
 		err := pull(client, cfg, opts)
@@ -333,8 +332,10 @@ func run(cfg config, opts options, out io.Writer) (result, error) {
 		res.Since = dataTime(*p.Checkpoint)
 	}
 	if len(todo) > 0 {
-		fmt.Fprintln(out, "Downloading the new data ...")
-		if res, err = download(client, cfg, todo, res, out); err != nil {
+		stop := ticker(out, "Downloading the new data")
+		res, err = download(client, cfg, todo, res, out)
+		stop(err == nil)
+		if err != nil {
 			return result{}, err
 		}
 	}
@@ -363,7 +364,7 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 	if err != nil {
 		return res, err
 	}
-	defer os.RemoveAll(tmp) // gone once renamed; otherwise the half-made folder
+	defer os.RemoveAll(tmp)         // gone once renamed; otherwise the half-made folder
 	events := map[string]*idIndex{} // tracking files of this folder: appended by id, never re-read per bundle
 	for _, b := range todo {
 		if err := merge(client, cfg, b, tmp, events); err != nil {
@@ -417,6 +418,49 @@ func download(client *http.Client, cfg config, todo []bundle, res result, out io
 		fmt.Fprintf(out, "Note: the server could not record this download yet (%v); the next run tells it again.\n", err)
 	}
 	return res, nil
+}
+
+// newClient has no overall time limit (a first download can take long on a slow line) but gives up on a connection
+// that sends nothing for stall: a dropped Wi-Fi or router otherwise leaves the window waiting forever.
+func newClient(stall time.Duration) *http.Client {
+	if stall <= 0 {
+		stall = 2 * time.Minute
+	}
+	dialer := &net.Dialer{Timeout: 15 * time.Second}
+	return &http.Client{Transport: &http.Transport{
+		Proxy: http.ProxyFromEnvironment,
+		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
+			c, err := dialer.DialContext(ctx, network, addr)
+			if err != nil {
+				return nil, err
+			}
+			return idleConn{c, stall}, nil
+		},
+		ResponseHeaderTimeout: 60 * time.Second,
+	}}
+}
+
+// idleConn moves its read deadline forward on every read and write: a connection that keeps sending is never cut, a silent one
+// fails with os.ErrDeadlineExceeded. TLS runs on top of it, so https is covered too.
+type idleConn struct {
+	net.Conn
+	idle time.Duration
+}
+
+func (c idleConn) Read(b []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Read(b)
+}
+
+// Write moves it forward too: a pooled connection's background read set its deadline when it went idle, so without
+// this a request sent on it late would get only what is left of that time (a false "cannot connect" on a PUT).
+func (c idleConn) Write(b []byte) (int, error) {
+	if err := c.SetReadDeadline(time.Now().Add(c.idle)); err != nil {
+		return 0, err
+	}
+	return c.Conn.Write(b)
 }
 
 // rename retries for a few seconds: on Windows an antivirus or the search indexer may still hold a just-written file.

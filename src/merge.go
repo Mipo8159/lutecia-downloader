@@ -33,7 +33,7 @@ func mergeCSV(dst, src string) error {
 	if !slices.Equal(older.header, newer.header) {
 		if older.rows, err = reshape(older, newer.header); err != nil {
 			// A column was removed or renamed: the two can't be one file. Nothing is merged or marked downloaded.
-			return fmt.Errorf("the file %s is from an older version. Do not import it: tell Sweeft, and meanwhile unzip the program into a new, empty folder", filepath.Base(dst))
+			return fmt.Errorf("the file %s is from an older version. Do not import it: tell your admin, and meanwhile unzip the program into a new, empty folder", filepath.Base(dst))
 		}
 	}
 
